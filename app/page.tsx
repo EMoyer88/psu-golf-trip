@@ -348,13 +348,30 @@ function initApp() {
     state.beaver[beaverKey(roundId,groupId,hole)] = {holder, lost: !!lost};
     saveBeaver();
   }
-  function currentBeaverHolder(roundId:string, groupId:string, upToHole:number){
+  // Next player in the group's order after `holder`, wrapping around.
+  function nextBeaverHolder(players:string[], holder:string){
+    const idx = players.indexOf(holder);
+    if(idx===-1) return players[0];
+    return players[(idx+1) % players.length];
+  }
+  // The single source of truth for who holds the beaver ball at `uptoHole`.
+  // Walks hole by hole from 1: a manual tap on a hole becomes that hole's
+  // starting holder; otherwise the ball auto-advances to the next player
+  // after whoever held it, UNLESS that hole was marked "lost", in which case
+  // it stays put. The advance only applies going INTO the next hole, so the
+  // holder returned for `uptoHole` itself reflects any manual override on
+  // that hole without yet applying its own lost/advance outcome.
+  function currentBeaverHolder(roundId:string, groupId:string, uptoHole:number){
     const g = groupInRound(roundId, groupId);
     if(!g || !g.players.length) return null;
     let holder = g.players[0];
-    for(let h=1; h<upToHole; h++){
+    for(let h=1; h<=uptoHole; h++){
       const rec = getBeaver(roundId, groupId, h);
       if(rec && rec.holder) holder = rec.holder;
+      if(h<uptoHole){
+        const lost = !!(rec && rec.lost);
+        if(!lost) holder = nextBeaverHolder(g.players, holder);
+      }
     }
     return holder;
   }
@@ -465,6 +482,7 @@ function initApp() {
         roundId: state.activeRoundId, groupId: state.activeGroupId, hole: state.activeHole
       }) + tabbarHtml();
       bindEvents();
+      centerScoreStrips();
       return;
     }
     app.className = '';
@@ -721,7 +739,7 @@ function initApp() {
             const dotColor = diff<=-2? 'var(--success-text)' : diff===-1? '#2E9E5B' : 'transparent';
             return `
             <div class="playerrow-compact">
-              ${avatarHtml(p, 40)}
+              ${avatarHtml(p, 48)}
               <div class="pname">
                 <span class="nm">${esc(name)}</span>
                 <span class="meta">${meta}</span>
@@ -741,14 +759,14 @@ function initApp() {
           <button class="toolbarbtn primary" data-action="submit-hole" ${editable?'':'disabled'}>Submit</button>
         </div>
       </div>
-      ${state.beaverPanelOpen ? renderBeaverModal(round, group, hole, editable) : ''}
+      ${state.beaverPanelOpen ? renderBeaverModal(round, group, hole, editable, beaverHolder) : ''}
       ${state.mulliganPanelOpen ? renderMulliganModal(round, group, editable) : ''}
       ${state.scorecardModalOpen ? renderScorecardModal(round, group) : ''}
       ${state.pickerModalOpen ? renderPickerModal(round, group) : ''}
     `;
   }
 
-  function renderBeaverModal(round:any, group: RoundGroup, hole:any, editable:boolean){
+  function renderBeaverModal(round:any, group: RoundGroup, hole:any, editable:boolean, currentHolder:string|null){
     const beaverRec = getBeaver(round.id, group.id, hole.n);
     return `
     <div class="modal-overlay" data-action="close-modals">
@@ -758,7 +776,7 @@ function initApp() {
           <button class="link-btn" data-action="toggle-beaver-panel">Close</button>
         </div>
         <div style="display:flex;flex-wrap:wrap;">
-          ${group.players.map((name:string)=>`<span class="chip ${beaverRec && beaverRec.holder===name ? '' : 'off'}" ${editable?`data-action="set-beaver-holder" data-player="${esc(name)}"`:''}>${esc(name)}</span>`).join('')}
+          ${group.players.map((name:string)=>`<span class="chip ${currentHolder===name ? '' : 'off'}" ${editable?`data-action="set-beaver-holder" data-player="${esc(name)}"`:''}>${esc(name)}</span>`).join('')}
         </div>
         <label style="display:flex;align-items:center;gap:8px;margin-top:12px;font-size:13px;">
           <input type="checkbox" ${beaverRec && beaverRec.lost ? 'checked':''} ${editable?`data-action="toggle-beaver-lost"`:'disabled'}/>
@@ -1333,6 +1351,26 @@ function initApp() {
     `;
   }
 
+  // Scrolls each player's score strip so the currently-selected value (par
+  // by default) sits centered in view, instead of at the left edge. Runs on
+  // every fullscreen-score render — innerHTML replacement resets scrollLeft
+  // to 0 each time anyway, so "recenter always" is what keeps this correct
+  // both on initial load/hole-change and after any in-place re-render.
+  function centerScoreStrips(){
+    document.querySelectorAll('.scorestrip').forEach((strip:any)=>{
+      const sel = strip.querySelector('.scorebtn-sm.selected');
+      if(!sel) return;
+      // offsetLeft is relative to the nearest positioned ancestor, which may
+      // not be the strip itself — measure via getBoundingClientRect instead
+      // so this works regardless of the surrounding layout's positioning.
+      const stripRect = strip.getBoundingClientRect();
+      const selRect = sel.getBoundingClientRect();
+      const selLeftWithinStrip = (selRect.left - stripRect.left) + strip.scrollLeft;
+      const target = selLeftWithinStrip - (strip.clientWidth/2) + (selRect.width/2);
+      strip.scrollLeft = Math.max(0, target);
+    });
+  }
+
   function bindEvents(){
     document.querySelectorAll('[data-tab]').forEach((el:any)=>{
       el.onclick = ()=>{
@@ -1572,6 +1610,69 @@ function initApp() {
       el.onclick = ()=>{ el.classList.toggle('off'); };
     });
   }
+
+  // ---- pull-to-refresh (Home + Leaders only; Score tab has its own
+  // fullscreen layout + realtime sync and is explicitly excluded) ----
+  let ptrStartY: number|null = null;
+  let ptrTriggered = false;
+  let ptrRefreshing = false;
+
+  function ptrEligibleTab(){
+    return state.tab==='home' || state.tab==='board';
+  }
+  function showRefreshBanner(){
+    let el = document.getElementById('ptr-banner');
+    if(!el){
+      el = document.createElement('div');
+      el.id = 'ptr-banner';
+      el.textContent = 'Refreshing…';
+      el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:100;text-align:center;padding:8px;font-size:12px;font-weight:600;color:#fff;background:var(--navy);transform:translateY(-100%);transition:transform .2s ease;';
+      document.body.appendChild(el);
+    }
+    requestAnimationFrame(()=>{ el!.style.transform='translateY(0)'; });
+  }
+  function hideRefreshBanner(){
+    const el = document.getElementById('ptr-banner');
+    if(el) el.style.transform='translateY(-100%)';
+  }
+  async function doPullRefresh(){
+    ptrRefreshing = true;
+    showRefreshBanner();
+    try{
+      if(state.tab==='home'){
+        const cfg = await kvGet('trip-config');
+        if(cfg){ state.config = cfg; recomputeSession(); }
+      } else if(state.tab==='board'){
+        const [sc, mu, bv, cfg] = await Promise.all([
+          kvGet('scores'), kvGet('mulligans'), kvGet('beaver'), kvGet('trip-config')
+        ]);
+        if(sc) state.scores = sc;
+        if(mu) state.mulligans = mu;
+        if(bv) state.beaver = bv;
+        if(cfg){ state.config = cfg; recomputeSession(); }
+      }
+      render();
+    } finally {
+      setTimeout(()=>{ hideRefreshBanner(); ptrRefreshing = false; }, 400);
+    }
+  }
+  window.addEventListener('touchstart', (e:TouchEvent)=>{
+    if(!ptrEligibleTab() || ptrRefreshing || window.scrollY>0){ ptrStartY = null; return; }
+    ptrStartY = e.touches[0].clientY;
+    ptrTriggered = false;
+  }, {passive:true});
+  window.addEventListener('touchmove', (e:TouchEvent)=>{
+    if(ptrStartY==null || ptrRefreshing || ptrTriggered) return;
+    const dy = e.touches[0].clientY - ptrStartY;
+    if(dy>0 && window.scrollY<=0){
+      e.preventDefault(); // suppress native overscroll/rubber-band while we handle the pull ourselves
+      if(dy>70){
+        ptrTriggered = true;
+        doPullRefresh();
+      }
+    }
+  }, {passive:false});
+  window.addEventListener('touchend', ()=>{ ptrStartY = null; }, {passive:true});
 
   load();
 }
