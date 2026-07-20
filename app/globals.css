@@ -53,6 +53,7 @@ body{
 .tabbtn{display:flex;flex-direction:column;align-items:center;gap:2px;background:none;border:none;color:var(--text-muted);font-size:10px;padding:6px 4px;cursor:pointer;flex:1;}
 .tabbtn.active{color:var(--navy);}
 .tabbtn svg{width:20px;height:20px;}
+.tab-dot{position:absolute;top:2px;right:28%;width:8px;height:8px;border-radius:50%;background:#e53935;border:1.5px solid #fff;}
 input[type=text], input[type=number], input[type=password], select, textarea{
   width:100%;border:1px solid var(--border);border-radius:8px;padding:9px 10px;font-size:14px;background:#fff;color:var(--text);
 }
@@ -81,16 +82,16 @@ table.sc td.name{text-align:left;font-weight:600;background:#fff;}
 .scoretopbar .navbtn{flex:0 0 auto;width:46px;height:46px;border-radius:10px;border:1px solid var(--border);background:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;cursor:pointer;}
 .scoretopbar .holeinfo{flex:1;text-align:center;font-size:16px;}
 .scoretopbar .holeinfo b{font-size:21px;}
-.playersarea{flex:1 1 auto;display:flex;flex-direction:column;gap:12px;min-height:0;justify-content:center;}
-.playerrow-compact{background:#fff;border:1px solid var(--border);border-radius:14px;padding:14px 16px;display:flex;align-items:center;gap:12px;flex:0 1 auto;min-height:64px;}
-.playerrow-compact .pname{flex:0 0 auto;width:104px;min-width:0;}
-.playerrow-compact .pname .nm{font-size:19px;font-weight:700;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.playerrow-compact .pname .meta{font-size:13px;color:var(--text-muted);display:block;}
-.playerrow-compact .scorestrip{flex:1;display:flex;gap:7px;overflow-x:auto;min-width:0;}
-.scorebtn-sm{flex:0 0 auto;width:46px;height:46px;border-radius:10px;border:1px solid var(--border);background:#fff;color:var(--text);font-size:18px;font-weight:600;cursor:pointer;}
-.scorebtn-sm.selected{border:2px solid var(--navy);background:var(--navy);color:#fff;}
+.playersarea{flex:1 1 auto;display:flex;flex-direction:column;gap:12px;min-height:0;justify-content:stretch;}
+.playerrow-compact{background:#fff;border:1px solid var(--border);border-radius:16px;padding:10px 14px;display:flex;align-items:center;gap:10px;flex:1 1 0;min-height:72px;}
+.playerrow-compact .pcol{flex:0 0 auto;width:76px;min-width:0;display:flex;flex-direction:column;align-items:center;gap:2px;text-align:center;}
+.playerrow-compact .pcol .nm{font-size:14px;font-weight:700;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:76px;}
+.playerrow-compact .pcol .meta{font-size:11px;color:var(--text-muted);display:block;}
+.playerrow-compact .scorestrip{flex:1;display:flex;align-items:center;gap:8px;overflow-x:auto;min-width:0;padding:0 6px;}
+.scorebtn-sm{flex:0 0 auto;width:44px;height:44px;border-radius:10px;border:1px solid var(--border);background:#fff;color:var(--text-muted);font-size:17px;font-weight:600;cursor:pointer;}
+.scorebtn-sm.selected{border:2px solid var(--navy);background:var(--navy);color:#fff;font-size:19px;}
 .tagdot{flex:0 0 auto;width:10px;height:10px;border-radius:50%;background:var(--success-text);}
-.beaverslot{flex:0 0 auto;position:relative;width:44px;height:44px;display:flex;align-items:center;justify-content:center;cursor:pointer;}
+.beaverslot{flex:0 0 auto;position:relative;width:30px;height:52px;display:flex;align-items:center;justify-content:center;cursor:pointer;}
 .beaverslot img{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:82px;height:82px;object-fit:contain;pointer-events:none;}
 .bottomtoolbar{flex:0 0 auto;display:flex;gap:8px;padding:12px 0 8px;}
 .bottomtoolbar button.toolbarbtn{flex:1;font-size:14px;padding:14px 6px;border-radius:10px;border:1px solid var(--border);background:#fff;color:var(--text);position:relative;}
@@ -106,6 +107,8 @@ table.sc td.name{text-align:left;font-weight:600;background:#fff;}
 .matchup .teampts{font-size:22px;font-weight:700;color:var(--text-muted);}
 .matchup .teamcol.leading .teampts{color:var(--success-text);}
 .matchup .vs{font-size:11px;color:var(--text-muted);font-weight:600;}
+
+@keyframes mullpulse{0%,100%{opacity:1;}50%{opacity:0.25;}}
 
 @media print{
   .tabbar, .no-print{display:none !important;}

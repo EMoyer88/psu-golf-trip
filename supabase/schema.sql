@@ -73,12 +73,10 @@ create policy "anyone can view photos"
 --    user's email against the `email` field on each roster player (stored in
 --    the `trip-config` row above) to figure out who they are.
 --
---    One manual dashboard step is required: go to Authentication > Providers
---    > Email and make sure "Confirm email" is turned ON. With that on,
---    supabase.auth.signUp() sends its own confirmation email and won't
---    create an active session until the user clicks the link — the app
---    already handles that (it shows a "check your email" message and lets
---    them sign in once confirmed). No other auth configuration is needed.
+--    "Confirm email" (Authentication > Providers > Email) is turned OFF for
+--    this trip, so supabase.auth.signUp() returns an active session
+--    immediately — no confirmation email step. No other auth configuration
+--    is needed.
 --
 --    Player selfies are uploaded to the same `photos` bucket used for chat
 --    and receipt photos, under an `avatars/` folder — already covered by the

@@ -15,7 +15,7 @@ Follow these steps in order — total time is about 15 minutes.
 2. Open `supabase/schema.sql` from this folder, copy all of it, paste it into the editor.
 3. Click **Run**. You should see "Success. No rows returned."
 4. Go to **Storage** (left sidebar) and confirm a bucket named `photos` exists and is marked Public. (The SQL script creates it, but if it's missing, create it manually: New bucket > name `photos` > toggle Public on.)
-5. Go to **Authentication > Providers > Email** and make sure **Confirm email** is turned ON. The app uses real email + password sign-up/sign-in (no OAuth) — Supabase sends the confirmation email itself, the app just calls `signUp`/`signInWithPassword`.
+5. The app uses real email + password sign-up/sign-in (no OAuth) via `signUp`/`signInWithPassword`. **Confirm email** (Authentication > Providers > Email) is OFF for this trip, so signing up logs someone in immediately — no confirmation email step.
 
 ## 3. Get your API keys
 
@@ -59,8 +59,8 @@ it there once you have his real number.
 ## Signing in
 
 Each player signs up with their own email + password (the same email that's
-on their roster row) and confirms via the email Supabase sends. If someone's
-email doesn't match any roster row, they'll see a friendly message asking
+on their roster row) and is signed in immediately — no email confirmation
+step. If someone's email doesn't match any roster row, they'll see a friendly message asking
 them to get added — an admin can fix it in **Admin > Roster & groups**. New
 sign-ups are required to add a selfie before they can use the app; it's
 stored in the `photos` bucket under `avatars/` and shown next to their name
@@ -79,5 +79,3 @@ printing blank 2v2 scorecards.
 - Blank page / console errors about Supabase: double-check the two environment
   variables in Vercel are exactly right, then redeploy (Vercel > Deployments > ⋯ > Redeploy).
 - Photos not uploading: confirm the `photos` bucket in Supabase Storage is set to Public.
-- Sign-up email never arrives: check spam, and confirm **Confirm email** is ON
-  under Authentication > Providers > Email.

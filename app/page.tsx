@@ -70,6 +70,8 @@ function initApp() {
     printGroupId: null,
     printMode: 'one',
     dangerRoundId: null,
+    reactorsModal: null,
+    replyingToId: null,
   };
 
   async function load(){
@@ -164,7 +166,9 @@ function initApp() {
       recomputeSession();
       render();
     } else {
-      state.authInfo = 'Check your email to confirm your account, then sign in below.';
+      // Email confirmation is off, so signUp() should always return an active
+      // session above — this branch only covers an unexpected edge case.
+      state.authInfo = 'Account created — sign in below to continue.';
       state.authView = 'signin';
       state.authPassword='';
       render();
@@ -521,7 +525,8 @@ function initApp() {
     `;
   }
   function tabBtn(id:string,label:string){
-    return `<button class="tabbtn ${state.tab===id?'active':''}" data-tab="${id}">${icon(id==='profile'?'user':id)}<span>${label}</span></button>`;
+    const showDot = id==='feed' && hasUnreadFeed();
+    return `<button class="tabbtn ${state.tab===id?'active':''}" data-tab="${id}" style="position:relative;">${icon(id==='profile'?'user':id)}<span>${label}</span>${showDot?'<span class="tab-dot"></span>':''}</button>`;
   }
 
   function renderNotOnRoster(){
@@ -739,8 +744,8 @@ function initApp() {
             const dotColor = diff<=-2? 'var(--success-text)' : diff===-1? '#2E9E5B' : 'transparent';
             return `
             <div class="playerrow-compact">
-              ${avatarHtml(p, 48)}
-              <div class="pname">
+              <div class="pcol">
+                ${avatarHtml(p, 60)}
                 <span class="nm">${esc(name)}</span>
                 <span class="meta">${meta}</span>
               </div>
@@ -793,14 +798,16 @@ function initApp() {
           <h3 style="margin:0;font-size:14px;">🍺 Shotgun Mullies</h3>
           <button class="link-btn" data-action="toggle-mulligan-panel">Close</button>
         </div>
+        ${editable ? `
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Who's taking the mulligan? We'll record a quick 10-second video of it.</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;">
+          ${group.players.map((name:string)=>`<span class="chip" data-action="start-mulligan-capture" data-player="${esc(name)}" data-round="${esc(round.id)}">${esc(name)}</span>`).join('')}
+        </div>` : ''}
+        <div style="font-size:11px;color:var(--text-muted);margin-bottom:4px;">This round's count</div>
         ${group.players.map((name:string)=>`
-          <div class="row" style="margin:8px 0;">
+          <div class="row" style="margin:4px 0;">
             <span style="font-size:13px;">${esc(name)}</span>
-            <span style="display:flex;align-items:center;gap:10px;">
-              <button class="btn small" ${editable?`data-action="mulligan" data-player="${esc(name)}" data-delta="-1"`:'disabled'}>−</button>
-              <span style="min-width:16px;text-align:center;font-weight:600;">${getMulligans(round.id,name)}</span>
-              <button class="btn small" ${editable?`data-action="mulligan" data-player="${esc(name)}" data-delta="1"`:'disabled'}>+</button>
-            </span>
+            <span style="font-weight:600;font-size:13px;">${getMulligans(round.id,name)}</span>
           </div>
         `).join('')}
       </div>
@@ -1092,7 +1099,44 @@ function initApp() {
   }
 
   const REACTION_EMOJIS = ['👍','❤️','😂','⛳','🍺'];
+
+  // ---- feed unread tracking (per-device, localStorage — not shared trip data) ----
+  function feedActivityCount(){
+    return state.chat.reduce((sum:number,m:any)=>sum+1+((m.replies||[]).length), 0);
+  }
+  function hasUnreadFeed(){
+    let seen = 0;
+    try{ seen = parseInt(localStorage.getItem('golf-feed-seen')||'0',10)||0; }catch(e){}
+    return feedActivityCount() > seen;
+  }
+  function markFeedSeen(){
+    try{ localStorage.setItem('golf-feed-seen', String(feedActivityCount())); }catch(e){}
+  }
+
+  // ---- reactions: one active emoji per person per post ----
+  function reactorsFor(msg:any, emoji:string): string[] {
+    const r = msg.reactions && msg.reactions[emoji];
+    return Array.isArray(r) ? r : [];
+  }
+  function toggleReaction(msg:any, emoji:string){
+    if(!state.session){ alert('Sign in to react.'); return; }
+    const person = state.session.name;
+    if(!msg.reactions) msg.reactions = {};
+    const alreadyOnThis = reactorsFor(msg, emoji).includes(person);
+    // One active reaction per person: clear their name from every emoji first.
+    REACTION_EMOJIS.forEach(em=>{
+      msg.reactions[em] = reactorsFor(msg, em).filter((n:string)=>n!==person);
+    });
+    // Tapping your own already-active reaction just removes it (the "undo").
+    // Tapping a different one adds it back under the new emoji.
+    if(!alreadyOnThis){
+      msg.reactions[emoji] = [...reactorsFor(msg, emoji), person];
+    }
+    saveChat();
+  }
+
   function renderFeed(){
+    markFeedSeen();
     return `
       <div class="card">
         <h3>Post to the feed</h3>
@@ -1101,27 +1145,75 @@ function initApp() {
         <button class="btn primary block" data-action="add-post" style="margin-top:10px;">Post</button>
       </div>
       ${state.chat.length===0? '<div class="empty">No posts yet — be the first!</div>' :
-        state.chat.slice().reverse().map((m:any)=>{
-          const reactions = m.reactions || {};
-          const authorP = m.author ? findPlayerObj(m.author) : null;
-          return `
-        <div class="msg">
-          <div style="display:flex;align-items:center;gap:8px;">
-            ${avatarHtml(authorP, 26)}
-            <span class="author">${esc(m.author||'Someone')}</span><span class="time">${esc(m.time||'')}</span>
-          </div>
-          <div style="font-size:14px;margin-top:4px;clear:both;">${esc(m.text||'')}</div>
-          ${m.photo? `<img src="${m.photo}"/>` : ''}
-          <div style="display:flex;gap:4px;margin-top:8px;flex-wrap:wrap;">
-            ${REACTION_EMOJIS.map(em=>{
-              const count = reactions[em]||0;
-              return `<span class="chip ${count>0?'':'off'}" style="padding:2px 8px;font-size:12px;" data-action="react" data-mid="${esc(m.id||'')}" data-emoji="${em}">${em}${count>0?' '+count:''}</span>`;
-            }).join('')}
-          </div>
-        </div>`;
-        }).join('')
+        state.chat.slice().reverse().map(renderFeedMessage).join('')
       }
+      ${state.reactorsModal ? renderReactorsModal() : ''}
     `;
+  }
+
+  function renderFeedMessage(m:any){
+    const authorP = m.author ? findPlayerObj(m.author) : null;
+    const replies = m.replies || [];
+    const replying = state.replyingToId === m.id;
+    return `
+      <div class="msg">
+        <div style="display:flex;align-items:center;gap:8px;">
+          ${avatarHtml(authorP, 26)}
+          <span class="author">${esc(m.author||'Someone')}</span><span class="time">${esc(m.time||'')}</span>
+        </div>
+        <div style="font-size:14px;margin-top:4px;clear:both;">${esc(m.text||'')}</div>
+        ${m.photo? `<img src="${m.photo}"/>` : ''}
+        ${m.video? `<video src="${m.video}" controls playsinline style="width:100%;border-radius:8px;margin-top:6px;"></video>` : ''}
+        <div style="display:flex;gap:2px;margin-top:8px;flex-wrap:wrap;align-items:center;">
+          ${REACTION_EMOJIS.map(em=>{
+            const names = reactorsFor(m, em);
+            const mine = state.session && names.includes(state.session.name);
+            return `
+            <span style="display:inline-flex;align-items:center;margin:2px 2px 2px 0;">
+              <span class="chip reaction-chip ${names.length>0||mine?'':'off'}" style="padding:2px 8px;font-size:12px;${names.length>0?'border-radius:14px 0 0 14px;':''}" data-action="react" data-mid="${esc(m.id||'')}" data-emoji="${em}">${em}</span>${names.length>0? `<span class="chip off" style="padding:2px 6px;font-size:11px;font-weight:700;border-radius:0 14px 14px 0;border-left:none;cursor:pointer;" data-action="show-reactors" data-mid="${esc(m.id||'')}" data-emoji="${em}">${names.length}</span>`:''}
+            </span>`;
+          }).join('')}
+          <button class="link-btn" style="font-size:11px;margin-left:auto;" data-action="toggle-reply" data-mid="${esc(m.id||'')}">Reply${replies.length? ` (${replies.length})`:''}</button>
+        </div>
+        ${replying? `
+        <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);">
+          <textarea id="reply-text-${esc(m.id||'')}" rows="2" placeholder="Write a reply..." style="font-size:13px;"></textarea>
+          <button class="btn primary small" style="margin-top:6px;" data-action="add-reply" data-mid="${esc(m.id||'')}">Reply</button>
+        </div>` : ''}
+        ${replies.length? `
+        <div style="margin-top:8px;padding-left:12px;border-left:2px solid var(--border);display:flex;flex-direction:column;gap:8px;">
+          ${replies.map((r:any)=>{
+            const rp = r.author? findPlayerObj(r.author): null;
+            return `
+            <div>
+              <div style="display:flex;align-items:center;gap:6px;">
+                ${avatarHtml(rp, 20)}
+                <span class="author" style="font-size:11px;">${esc(r.author||'Someone')}</span><span class="time" style="font-size:9px;">${esc(r.time||'')}</span>
+              </div>
+              <div style="font-size:13px;margin-top:2px;">${esc(r.text||'')}</div>
+            </div>`;
+          }).join('')}
+        </div>` : ''}
+      </div>`;
+  }
+
+  function renderReactorsModal(){
+    const { mid, emoji } = state.reactorsModal;
+    const msg = state.chat.find((m:any)=>String(m.id)===String(mid));
+    const names: string[] = msg ? reactorsFor(msg, emoji) : [];
+    return `
+    <div class="modal-overlay" data-action="close-reactors-modal">
+      <div class="modal-sheet" onclick="event.stopPropagation()">
+        <div class="row" style="margin-bottom:10px;">
+          <h3 style="margin:0;font-size:14px;">${emoji} Reacted</h3>
+          <button class="link-btn" data-action="close-reactors-modal">Close</button>
+        </div>
+        ${names.length===0? '<div class="empty">No one yet.</div>' : names.map(n=>{
+          const p = findPlayerObj(n);
+          return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;">${avatarHtml(p,26)}<span style="font-size:13px;">${esc(n)}</span></div>`;
+        }).join('')}
+      </div>
+    </div>`;
   }
 
   function renderProfile(){
@@ -1371,6 +1463,144 @@ function initApp() {
     });
   }
 
+  // ---- video shotgun mulligan capture ----
+  // Lives entirely outside the normal render()/#app innerHTML cycle — that
+  // cycle can be triggered at any moment by an unrelated realtime update
+  // (someone posts an expense while a video is recording), and innerHTML
+  // replacement would tear down the live <video> preview mid-recording.
+  // Appending our own overlay directly to document.body keeps it immune.
+  let mulliganCtx: any = null;
+
+  function openMulliganCaptureFlow(player:string, roundId:string){
+    let overlay = document.getElementById('mulligan-overlay');
+    if(!overlay){
+      overlay = document.createElement('div');
+      overlay.id = 'mulligan-overlay';
+      overlay.style.cssText = 'position:fixed;inset:0;background:#000;z-index:200;display:flex;flex-direction:column;';
+      document.body.appendChild(overlay);
+    }
+    beginMulliganRecording(overlay, player, roundId);
+  }
+
+  function teardownMulliganCapture(){
+    if(mulliganCtx){
+      if(mulliganCtx.iv) clearInterval(mulliganCtx.iv);
+      if(mulliganCtx.recorder && mulliganCtx.recorder.state!=='inactive'){
+        try{ mulliganCtx.recorder.stop(); }catch(e){}
+      }
+      if(mulliganCtx.stream){ mulliganCtx.stream.getTracks().forEach((t:any)=>t.stop()); }
+      if(mulliganCtx.videoUrl){ URL.revokeObjectURL(mulliganCtx.videoUrl); }
+    }
+    mulliganCtx = null;
+    const overlay = document.getElementById('mulligan-overlay');
+    if(overlay) overlay.remove();
+  }
+
+  function beginMulliganRecording(overlay:HTMLElement, player:string, roundId:string){
+    overlay.innerHTML = `
+      <div style="flex:1;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;">
+        <video id="mull-video" autoplay muted playsinline style="width:100%;height:100%;object-fit:cover;"></video>
+        <div style="position:absolute;top:16px;left:16px;background:rgba(0,0,0,0.55);color:#fff;padding:6px 12px;border-radius:20px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px;">
+          <span style="width:10px;height:10px;border-radius:50%;background:#e53935;animation:mullpulse 1s infinite;"></span>
+          <span id="mull-timer">Recording… 10</span>
+        </div>
+        <button id="mull-cancel" style="position:absolute;top:16px;right:16px;background:rgba(0,0,0,0.55);color:#fff;border:none;border-radius:20px;padding:6px 12px;font-size:13px;">Cancel</button>
+      </div>
+      <div style="text-align:center;color:#fff;font-size:13px;padding:12px;">🍺 ${esc(player)}'s shotgun mulligan</div>
+    `;
+    document.getElementById('mull-cancel')!.onclick = ()=> teardownMulliganCapture();
+
+    const videoEl = document.getElementById('mull-video') as HTMLVideoElement;
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode:'user', width:{ideal:640}, height:{ideal:854}, frameRate:{ideal:24} },
+      audio: true,
+    }).then((stream)=>{
+      videoEl.srcObject = stream;
+      const chunks: Blob[] = [];
+      const preferredType = ['video/webm;codecs=vp8,opus','video/webm','video/mp4']
+        .find(t=>(window as any).MediaRecorder && MediaRecorder.isTypeSupported(t));
+      // Compression happens at capture time (constrained resolution/frame
+      // rate above + a capped bitrate here) rather than a separate transcode
+      // pass — there's no lightweight in-browser video transcoder available,
+      // and this keeps a 10s clip to a reasonable upload size.
+      const recorder = preferredType
+        ? new MediaRecorder(stream, { mimeType: preferredType, videoBitsPerSecond: 1_000_000 })
+        : new MediaRecorder(stream, { videoBitsPerSecond: 1_000_000 });
+      recorder.ondataavailable = (e)=>{ if(e.data.size>0) chunks.push(e.data); };
+      recorder.onstop = ()=>{
+        stream.getTracks().forEach(t=>t.stop());
+        const blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' });
+        showMulliganReview(overlay, player, roundId, blob);
+      };
+      recorder.start();
+      let remaining = 10;
+      const timerEl = document.getElementById('mull-timer');
+      const iv = setInterval(()=>{
+        remaining--;
+        if(timerEl) timerEl.textContent = `Recording… ${Math.max(remaining,0)}`;
+        if(remaining<=0){
+          clearInterval(iv);
+          if(recorder.state!=='inactive') recorder.stop();
+        }
+      }, 1000);
+      mulliganCtx = { stream, recorder, iv };
+    }).catch((err:any)=>{
+      overlay.innerHTML = `
+        <div style="flex:1;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;color:#fff;font-size:14px;">
+          Camera/mic access is needed to record a mulligan.${err && err.message ? ' ('+esc(err.message)+')' : ''}
+        </div>
+        <button id="mull-close-err" style="margin:0 16px 16px;padding:12px;border-radius:10px;border:none;background:#fff;font-weight:600;">Close</button>
+      `;
+      document.getElementById('mull-close-err')!.onclick = ()=> teardownMulliganCapture();
+    });
+  }
+
+  function showMulliganReview(overlay:HTMLElement, player:string, roundId:string, blob:Blob){
+    const url = URL.createObjectURL(blob);
+    mulliganCtx = { videoUrl: url };
+    overlay.innerHTML = `
+      <div style="flex:1;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;">
+        <video src="${url}" controls autoplay loop playsinline style="width:100%;height:100%;object-fit:contain;background:#000;"></video>
+      </div>
+      <div style="display:flex;gap:10px;padding:14px;background:#000;">
+        <button id="mull-retake" class="toolbarbtn" style="flex:1;background:transparent;color:#fff;border-color:rgba(255,255,255,0.4);">Retake</button>
+        <button id="mull-post" class="toolbarbtn primary" style="flex:1;">Post mulligan</button>
+      </div>
+    `;
+    document.getElementById('mull-retake')!.onclick = ()=>{
+      URL.revokeObjectURL(url);
+      beginMulliganRecording(overlay, player, roundId);
+    };
+    document.getElementById('mull-post')!.onclick = async ()=>{
+      const postBtn = document.getElementById('mull-post') as HTMLButtonElement;
+      postBtn.disabled = true; postBtn.textContent = 'Posting…';
+      try{
+        const ext = (blob.type||'').includes('mp4') ? 'mp4' : 'webm';
+        const file = new File([blob], `mulligan-${Date.now()}.${ext}`, { type: blob.type || 'video/webm' });
+        const uploadedUrl = await uploadPhoto(file, 'mulligans');
+        if(uploadedUrl){
+          const id = Date.now()+'-'+Math.random().toString(36).slice(2,7);
+          const time = new Date().toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+          state.chat.push({ id, author: player, text: `🍺 ${player} took a shotgun mulligan`, time, video: uploadedUrl, reactions:{}, replies:[] });
+          saveChat();
+          changeMulligan(roundId, player, 1);
+        } else {
+          alert('Upload failed — check your connection and try again.');
+          postBtn.disabled = false; postBtn.textContent = 'Post mulligan';
+          return;
+        }
+        URL.revokeObjectURL(url);
+        mulliganCtx = null;
+        const el = document.getElementById('mulligan-overlay');
+        if(el) el.remove();
+        render();
+      }catch(e){
+        postBtn.disabled = false; postBtn.textContent = 'Post mulligan';
+        alert('Something went wrong posting the mulligan — try again.');
+      }
+    };
+  }
+
   function bindEvents(){
     document.querySelectorAll('[data-tab]').forEach((el:any)=>{
       el.onclick = ()=>{
@@ -1486,7 +1716,11 @@ function initApp() {
         const holder = rec?rec.holder:currentBeaverHolder(state.activeRoundId,state.activeGroupId,state.activeHole);
         setBeaver(state.activeRoundId, state.activeGroupId, state.activeHole, holder, el.checked);
       }; }
-      if(action==='mulligan'){ el.onclick=()=>{ changeMulligan(state.activeRoundId, el.dataset.player, parseInt(el.dataset.delta,10)); }; }
+      if(action==='start-mulligan-capture'){ el.onclick=()=>{
+        state.mulliganPanelOpen = false;
+        render();
+        openMulliganCaptureFlow(el.dataset.player, el.dataset.round);
+      }; }
       if(action==='submit-hole'){ el.onclick=()=>{
         if(state.activeHole<18){ state.activeHole++; }
         render();
@@ -1496,12 +1730,56 @@ function initApp() {
       if(action==='pick-board-round'){ el.onclick=()=>{ state.boardRoundId=el.dataset.round; render(); }; }
       if(action==='toggle-board-expand'){ el.onclick=()=>{ state.boardExpanded[el.dataset.key]=!state.boardExpanded[el.dataset.key]; render(); }; }
       if(action==='toggle-net-scorecard'){ el.onclick=()=>{ state.boardNetScorecardOpen=!state.boardNetScorecardOpen; render(); }; }
-      if(action==='react'){ el.onclick=()=>{
-        const msg = state.chat.find((m:any)=>String(m.id)===el.dataset.mid);
+      if(action==='react'){
+        // Long-press (or press-and-hold with a mouse) shows who reacted instead
+        // of toggling — a redundant path to the same info the count badge opens.
+        let pressTimer: any = null;
+        let longPressed = false;
+        const startPress = ()=>{
+          longPressed = false;
+          pressTimer = setTimeout(()=>{
+            longPressed = true;
+            state.reactorsModal = { mid: el.dataset.mid, emoji: el.dataset.emoji };
+            render();
+          }, 550);
+        };
+        const cancelPress = ()=>{ if(pressTimer) clearTimeout(pressTimer); };
+        el.addEventListener('touchstart', startPress, {passive:true});
+        el.addEventListener('touchend', cancelPress);
+        el.addEventListener('touchmove', cancelPress);
+        el.addEventListener('mousedown', startPress);
+        el.addEventListener('mouseup', cancelPress);
+        el.addEventListener('mouseleave', cancelPress);
+        el.onclick = ()=>{
+          if(longPressed){ longPressed=false; return; }
+          const msg = state.chat.find((m:any)=>String(m.id)===el.dataset.mid);
+          if(!msg) return;
+          toggleReaction(msg, el.dataset.emoji);
+          render();
+        };
+      }
+      if(action==='show-reactors'){ el.onclick=()=>{
+        state.reactorsModal = { mid: el.dataset.mid, emoji: el.dataset.emoji };
+        render();
+      }; }
+      if(action==='close-reactors-modal'){ el.onclick=()=>{ state.reactorsModal = null; render(); }; }
+      if(action==='toggle-reply'){ el.onclick=()=>{
+        state.replyingToId = (state.replyingToId===el.dataset.mid) ? null : el.dataset.mid;
+        render();
+      }; }
+      if(action==='add-reply'){ el.onclick=()=>{
+        const mid = el.dataset.mid;
+        const textEl = document.getElementById(`reply-text-${mid}`) as HTMLTextAreaElement | null;
+        const text = textEl ? textEl.value.trim() : '';
+        if(!text) return;
+        const msg = state.chat.find((m:any)=>String(m.id)===mid);
         if(!msg) return;
-        if(!msg.reactions) msg.reactions = {};
-        msg.reactions[el.dataset.emoji] = (msg.reactions[el.dataset.emoji]||0) + 1;
+        if(!msg.replies) msg.replies = [];
+        const author = state.session ? state.session.name : 'Someone';
+        const time = new Date().toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+        msg.replies.push({ id: Date.now()+'-'+Math.random().toString(36).slice(2,7), author, text, time });
         saveChat();
+        state.replyingToId = null;
         render();
       }; }
       if(action==='mark-paid'){ el.onclick=()=>{
