@@ -54,7 +54,6 @@ function initApp() {
     activeRoundId: autoRoundId(),
     activeGroupId: null,
     activeHole: 1,
-    scoreView:'entry',
     beaverPanelOpen:false,
     mulliganPanelOpen:false,
     scorecardModalOpen:false,
@@ -70,6 +69,7 @@ function initApp() {
     printRoundId: null,
     printGroupId: null,
     printMode: 'one',
+    dangerRoundId: null,
   };
 
   async function load(){
@@ -458,7 +458,7 @@ function initApp() {
       }
     }
 
-    const fullscreenScore = state.tab==='score' && state.scoreView==='entry';
+    const fullscreenScore = state.tab==='score';
     if(fullscreenScore){
       app.className = 'fullscreen-score';
       app.innerHTML = renderScoreEntryFullScreen({
@@ -471,7 +471,6 @@ function initApp() {
 
     let body = '';
     if(state.tab==='home') body = renderHome();
-    else if(state.tab==='score') body = renderScore();
     else if(state.tab==='board') body = renderBoard();
     else if(state.tab==='cost') body = renderCost();
     else if(state.tab==='feed') body = renderFeed();
@@ -600,11 +599,6 @@ function initApp() {
         <div style="font-size:13px;color:var(--text-secondary);margin-bottom:10px;">Sign in with your email so you can enter scores for your own group.</div>
         <button class="btn primary block" data-action="go-auth">Sign in / sign up</button>
       </div>`}
-      <div class="card">
-        <h3>Manage roster</h3>
-        <div style="font-size:13px;color:var(--text-secondary);margin-bottom:8px;">Edit players, handicaps, emails, and group assignments for each round.</div>
-        <button class="btn block" data-action="edit-roster">Edit roster &amp; groups</button>
-      </div>
       ${roundsHtml}
     `;
   }
@@ -630,7 +624,6 @@ function initApp() {
         <button class="btn small" data-action="add-player">+ Add player</button>
       </div>
       ${ROUNDS.map(r=>renderRoundGroupsEditor(r.id, r.label)).join('')}
-      <button class="btn primary block" data-action="done-roster">Done</button>
     `;
   }
 
@@ -670,11 +663,6 @@ function initApp() {
         <button class="btn small" data-action="add-group" data-round="${roundId}">+ Add group</button>
       </div>
     `;
-  }
-
-  function renderScore(){
-    if(state.scoreView==='roster') return renderRosterEditor();
-    return '';
   }
 
   function renderScoreEntryFullScreen(opts:{roundId:string, groupId:string|null, hole:number}){
@@ -923,7 +911,7 @@ function initApp() {
             </div>
           </div>`;
         }).join('')}
-      </div>` : `<div class="card"><div class="empty">The 2v2 game runs Saturday AM &amp; PM — set up teams in Edit roster &amp; groups.</div></div>`)}
+      </div>` : `<div class="card"><div class="empty">The 2v2 game runs Saturday AM &amp; PM — set up teams in Admin &gt; Roster &amp; groups.</div></div>`)}
 
       <div class="grid2">
         ${miniList('gross','⛳ Best to par — gross', grossList, (x:any,i:number)=>`
@@ -956,7 +944,7 @@ function initApp() {
   function renderFridayBestBallCard(){
     const result = fridayBestBallResult();
     if(!result){
-      return `<div class="card"><div class="empty">Friday's best-ball match needs a 4-player team and a 3-player team — set up in Edit roster &amp; groups.</div></div>`;
+      return `<div class="card"><div class="empty">Friday's best-ball match needs a 4-player team and a 3-player team — set up in Admin &gt; Roster &amp; groups.</div></div>`;
     }
     const bigLeads = result.ptsBig>result.ptsSmall, smallLeads = result.ptsSmall>result.ptsBig;
     function names(list:string[]){
@@ -1162,8 +1150,14 @@ function initApp() {
         <span class="chip ${view==='scoring'?'':'off'}" data-action="admin-nav" data-view="scoring">Scores</span>
         <span class="chip ${view==='expenses'?'':'off'}" data-action="admin-nav" data-view="expenses">Expenses</span>
         <span class="chip ${view==='print'?'':'off'}" data-action="admin-nav" data-view="print">Print scorecards</span>
+        <span class="chip ${view==='roster'?'':'off'}" data-action="admin-nav" data-view="roster">Roster &amp; groups</span>
+        <span class="chip ${view==='danger'?'':'off'}" data-action="admin-nav" data-view="danger">Danger zone</span>
       </div>
-      ${view==='scoring'?renderAdminScoring(): view==='expenses'?renderAdminExpenses(): renderAdminPrint()}
+      ${view==='scoring'?renderAdminScoring()
+        : view==='expenses'?renderAdminExpenses()
+        : view==='print'?renderAdminPrint()
+        : view==='roster'?renderRosterEditor()
+        : renderAdminDanger()}
     `;
   }
 
@@ -1300,9 +1294,54 @@ function initApp() {
     `;
   }
 
+  // Deletes scores, mulligans, and beaver-ball state for one round. Match/
+  // leaderboard results (Friday best-ball, Saturday 2v2) aren't stored
+  // anywhere separately — they're always recomputed live from scores, so
+  // clearing scores here is sufficient to reset them too.
+  function clearRoundData(roundId:string){
+    const round = roundOf(roundId);
+    round.holes.forEach(h=>{ delete state.scores[scoreKey(roundId,h.n)]; });
+    delete state.mulligans[roundId];
+    groupsForRound(roundId).forEach(g=>{
+      round.holes.forEach(h=>{ delete state.beaver[beaverKey(roundId,g.id,h.n)]; });
+    });
+  }
+
+  function renderAdminDanger(){
+    const roundId = state.dangerRoundId || 'all';
+    const label = roundId==='all' ? 'all rounds' : roundOf(roundId).label;
+    return `
+      <div class="card" style="border-color:var(--danger-text);">
+        <h3>⚠️ Danger zone</h3>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">
+          For testing/practice runs before the real trip. This permanently deletes
+          <b>everyone's</b> entered scores, mulligans, and beaver-ball history for the
+          round you pick — it does <b>not</b> touch expenses, payments, chat/photos, or the roster.
+          This cannot be undone.
+        </div>
+        <label class="field">Round to clear</label>
+        <select data-action="danger-pick-round">
+          ${ROUNDS.map(r=>`<option value="${r.id}" ${r.id===roundId?'selected':''}>${r.label}</option>`).join('')}
+          <option value="all" ${roundId==='all'?'selected':''}>All rounds</option>
+        </select>
+        <label class="field">Type CLEAR to confirm</label>
+        <input type="text" id="danger-confirm-input" placeholder="CLEAR"/>
+        <button class="btn block" style="margin-top:12px;background:var(--danger-bg);color:var(--danger-text);border-color:var(--danger-text);font-weight:600;" data-action="danger-clear-scores">
+          Clear scores for ${esc(label)}
+        </button>
+      </div>
+    `;
+  }
+
   function bindEvents(){
     document.querySelectorAll('[data-tab]').forEach((el:any)=>{
-      el.onclick = ()=>{ state.tab = el.dataset.tab; render(); };
+      el.onclick = ()=>{
+        state.tab = el.dataset.tab;
+        if(state.tab==='score' && !groupInRound(state.activeRoundId, state.activeGroupId)){
+          state.activeGroupId = defaultGroupIdForRound(state.activeRoundId);
+        }
+        render();
+      };
     });
     document.querySelectorAll('[data-action]').forEach((el:any)=>{
       const action = el.dataset.action;
@@ -1325,8 +1364,6 @@ function initApp() {
       if(action==='profile-photo-file'){ el.onchange=()=>{
         if(el.files && el.files[0]) handleAvatarFile(el.files[0]);
       }; }
-      if(action==='edit-roster'){ el.onclick=()=>{ state.tab='score'; state.scoreView='roster'; render(); }; }
-      if(action==='done-roster'){ el.onclick=()=>{ state.scoreView='entry'; state.activeGroupId = defaultGroupIdForRound(state.activeRoundId); render(); }; }
       if(action==='rename-player'){ el.onchange=()=>{
         const pi=el.dataset.pi;
         const oldName = state.config.roster[pi].name;
@@ -1517,6 +1554,19 @@ function initApp() {
       if(action==='print-pick-group'){ el.onchange=()=>{ state.printGroupId=el.value; render(); }; }
       if(action==='print-one'){ el.onclick=()=>{ state.printMode='one'; render(); setTimeout(()=>window.print(),50); }; }
       if(action==='print-all'){ el.onclick=()=>{ state.printMode='all'; render(); setTimeout(()=>window.print(),50); }; }
+      if(action==='danger-pick-round'){ el.onchange=()=>{ state.dangerRoundId=el.value; render(); }; }
+      if(action==='danger-clear-scores'){ el.onclick=()=>{
+        const input = document.getElementById('danger-confirm-input') as HTMLInputElement | null;
+        if(!input || input.value.trim()!=='CLEAR'){ alert('Type CLEAR (all caps) in the box to confirm.'); return; }
+        const target = state.dangerRoundId || 'all';
+        const roundIds = target==='all' ? ROUNDS.map(r=>r.id) : [target];
+        const label = target==='all' ? 'ALL rounds' : roundOf(target).label;
+        if(!confirm(`This will permanently delete all scores, mulligans, and beaver-ball data for ${label}. This cannot be undone. Continue?`)) return;
+        roundIds.forEach(clearRoundData);
+        saveScores(); saveMulligans(); saveBeaver();
+        input.value='';
+        render();
+      }; }
     });
     document.querySelectorAll('[data-toggle-split]').forEach((el:any)=>{
       el.onclick = ()=>{ el.classList.toggle('off'); };

@@ -51,22 +51,27 @@ just open it. Scores, chat, photos, and expenses are all shared live through Sup
 
 ## Editing the roster later
 
-Go to **Home > Edit roster & groups** in the app itself to fix names, emails,
-handicaps, or group/tee-time assignments before the trip. Chris "Chilla"
-Chilla's handicap starts as a `0` placeholder — update it there once you have
-his real number.
+Go to **Admin > Roster & groups** (see below — admin-only) in the app itself
+to fix names, emails, handicaps, or group/tee-time assignments before the
+trip. Chris "Chilla" Chilla's handicap starts as a `0` placeholder — update
+it there once you have his real number.
 
 ## Signing in
 
 Each player signs up with their own email + password (the same email that's
 on their roster row) and confirms via the email Supabase sends. If someone's
 email doesn't match any roster row, they'll see a friendly message asking
-them to get added — fix it in **Edit roster & groups**. New sign-ups are
-required to add a selfie before they can use the app; it's stored in the
-`photos` bucket under `avatars/` and shown next to their name everywhere.
+them to get added — an admin can fix it in **Admin > Roster & groups**. New
+sign-ups are required to add a selfie before they can use the app; it's
+stored in the `photos` bucket under `avatars/` and shown next to their name
+everywhere.
 
 Two emails (`erik.moyer.88@gmail.com` and `gpoli111@gmail.com`) get an extra
-**Admin** tab for editing any group's scores, editing/deleting expenses, and
+**Admin** tab (hidden entirely for everyone else) for editing any group's
+scores, editing/deleting expenses, editing the roster & groups, a "Danger
+zone" to wipe scores/mulligans/beaver-ball data for a round during
+practice-run testing (with a typed "CLEAR" confirmation since it's
+irreversible), and
 printing blank 2v2 scorecards.
 
 ## If something looks wrong
