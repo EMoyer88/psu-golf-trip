@@ -15,6 +15,7 @@ Follow these steps in order — total time is about 15 minutes.
 2. Open `supabase/schema.sql` from this folder, copy all of it, paste it into the editor.
 3. Click **Run**. You should see "Success. No rows returned."
 4. Go to **Storage** (left sidebar) and confirm a bucket named `photos` exists and is marked Public. (The SQL script creates it, but if it's missing, create it manually: New bucket > name `photos` > toggle Public on.)
+5. Go to **Authentication > Providers > Email** and make sure **Confirm email** is turned ON. The app uses real email + password sign-up/sign-in (no OAuth) — Supabase sends the confirmation email itself, the app just calls `signUp`/`signInWithPassword`.
 
 ## 3. Get your API keys
 
@@ -50,11 +51,28 @@ just open it. Scores, chat, photos, and expenses are all shared live through Sup
 
 ## Editing the roster later
 
-Handicaps default to 0 and 2v2 teams default to A/A/B/B in player order — go to
-**Home > Edit groups & players** in the app itself to fix both before the trip.
+Go to **Home > Edit roster & groups** in the app itself to fix names, emails,
+handicaps, or group/tee-time assignments before the trip. Chris "Chilla"
+Chilla's handicap starts as a `0` placeholder — update it there once you have
+his real number.
+
+## Signing in
+
+Each player signs up with their own email + password (the same email that's
+on their roster row) and confirms via the email Supabase sends. If someone's
+email doesn't match any roster row, they'll see a friendly message asking
+them to get added — fix it in **Edit roster & groups**. New sign-ups are
+required to add a selfie before they can use the app; it's stored in the
+`photos` bucket under `avatars/` and shown next to their name everywhere.
+
+Two emails (`erik.moyer.88@gmail.com` and `gpoli111@gmail.com`) get an extra
+**Admin** tab for editing any group's scores, editing/deleting expenses, and
+printing blank 2v2 scorecards.
 
 ## If something looks wrong
 
 - Blank page / console errors about Supabase: double-check the two environment
   variables in Vercel are exactly right, then redeploy (Vercel > Deployments > ⋯ > Redeploy).
 - Photos not uploading: confirm the `photos` bucket in Supabase Storage is set to Public.
+- Sign-up email never arrives: check spam, and confirm **Confirm email** is ON
+  under Authentication > Providers > Email.

@@ -66,3 +66,20 @@ drop policy if exists "anyone can view photos" on storage.objects;
 create policy "anyone can view photos"
   on storage.objects for select
   using (bucket_id = 'photos');
+
+-- 5. Auth: this app uses real Supabase Auth (email + password) instead of
+--    tap-your-name sessions. No extra tables are needed — Supabase's built-in
+--    auth.users covers sign-up/sign-in, and the app matches the signed-in
+--    user's email against the `email` field on each roster player (stored in
+--    the `trip-config` row above) to figure out who they are.
+--
+--    One manual dashboard step is required: go to Authentication > Providers
+--    > Email and make sure "Confirm email" is turned ON. With that on,
+--    supabase.auth.signUp() sends its own confirmation email and won't
+--    create an active session until the user clicks the link — the app
+--    already handles that (it shows a "check your email" message and lets
+--    them sign in once confirmed). No other auth configuration is needed.
+--
+--    Player selfies are uploaded to the same `photos` bucket used for chat
+--    and receipt photos, under an `avatars/` folder — already covered by the
+--    storage policies above, since they apply to the whole bucket.
