@@ -598,15 +598,50 @@ function initApp() {
     `;
   }
 
+  function renderPairingCard(labelLeft:string, playersLeft:string[], labelRight:string, playersRight:string[]){
+    function names(list:string[]){
+      return list.map(n=>`<span style="display:inline-flex;align-items:center;gap:4px;margin:2px 6px 2px 0;">${avatarHtml(findPlayerObj(n),24)}<span style="font-size:12px;">${esc(n)}</span></span>`).join('');
+    }
+    return `
+      <div class="matchup" style="margin-bottom:8px;">
+        <div class="teamcol">
+          <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;">${esc(labelLeft)}</div>
+          <div class="teamnames" style="display:flex;flex-wrap:wrap;justify-content:center;">${names(playersLeft)}</div>
+        </div>
+        <div class="vs">VS</div>
+        <div class="teamcol">
+          <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;">${esc(labelRight)}</div>
+          <div class="teamnames" style="display:flex;flex-wrap:wrap;justify-content:center;">${names(playersRight)}</div>
+        </div>
+      </div>
+    `;
+  }
+
   function renderHome(){
     let roundsHtml = ROUNDS.map(r=>{
       const groups = groupsForRound(r.id);
+      let pairingsHtml = '';
+      if(r.id==='fri'){
+        const sorted = [...groups].sort((a,b)=>b.players.length-a.players.length);
+        if(sorted.length===2 && sorted[0].players.length>=2 && sorted[1].players.length>=2){
+          pairingsHtml = renderPairingCard(
+            `${sorted[0].teeTime} · ${sorted[0].players.length}-some`, sorted[0].players,
+            `${sorted[1].teeTime} · ${sorted[1].players.length}-some`, sorted[1].players
+          );
+        }
+      } else {
+        pairingsHtml = groups.map(g=>{
+          const teams = teamsForGroup(g);
+          if(!teams || teams.a.length!==2 || teams.b.length!==2) return '';
+          return renderPairingCard(`${g.teeTime} · Team A`, teams.a, `${g.teeTime} · Team B`, teams.b);
+        }).join('');
+      }
       return `
       <div class="card">
         <div class="row"><h3 style="margin:0">${r.label} — ${esc(r.course)}</h3><span class="pill">Par ${r.par}</span></div>
         <div style="font-size:12px;color:var(--text-secondary);margin:4px 0 8px;">${r.yards.toLocaleString()} yds · ${esc(r.tee)} tee</div>
         <div class="divider"></div>
-        ${groups.map(g=>`
+        ${pairingsHtml || groups.map(g=>`
           <div class="row" style="margin-bottom:4px;align-items:flex-start;">
             <span style="font-size:13px;white-space:nowrap;">${esc(g.teeTime)}</span>
             <span style="font-size:12px;color:var(--text-secondary);text-align:right;">${g.players.join(', ')}</span>
@@ -732,22 +767,28 @@ function initApp() {
             const p = findPlayerObj(name);
             const val = scoresInit[name];
             const diff = val - hole.par;
-            let meta = '';
+            let teamLabel = '';
+            let strokes = 0;
             if(isFri){
-              const s = fridayBestBallStrokesForHole(name, round.si[holeIdx]);
-              meta = s>0 ? ('+'+s) : '';
+              strokes = fridayBestBallStrokesForHole(name, round.si[holeIdx]);
             } else if(group.teams && group.teams[name]){
-              const s = matchStrokesForHole(group, name, round.si[holeIdx]);
-              meta = 'Tm '+group.teams[name]+(s>0?' · +'+s:'');
+              teamLabel = 'Tm '+group.teams[name];
+              strokes = matchStrokesForHole(group, name, round.si[holeIdx]);
             }
             const isHolder = beaverHolder===name;
             const dotColor = diff<=-2? 'var(--success-text)' : diff===-1? '#2E9E5B' : 'transparent';
+            // Strokes get their own fixed-height row (always rendered, dots
+            // added only when strokes>0) so a player's name/avatar never
+            // shift position between holes depending on whether they have
+            // a stroke here — only the dot count inside changes.
+            const strokeDots = '<span class="stroke-dot"></span>'.repeat(strokes);
             return `
             <div class="playerrow-compact">
               <div class="pcol">
                 ${avatarHtml(p, 60)}
                 <span class="nm">${esc(name)}</span>
-                <span class="meta">${meta}</span>
+                ${teamLabel ? `<span class="meta">${teamLabel}</span>` : ''}
+                <div class="strokedots">${strokeDots}</div>
               </div>
               <div class="scorestrip">
                 ${opts_.map(n=>`<button class="scorebtn-sm ${n===val?'selected':''}" ${editable?`data-action="set-score" data-player="${esc(name)}" data-val="${n}"`:'disabled'}>${n}</button>`).join('')}
@@ -858,7 +899,10 @@ function initApp() {
     }
     return `
       <div style="overflow-x:auto;">
-      <div class="row"><h3 style="margin:0;">${esc(round.course)} — ${esc(group.teeTime)}</h3></div>
+      <div class="scorecard-header">
+        <img src="/logo.png" alt="Trip logo"/>
+        <h3 style="margin:0;">${esc(round.course)} — ${esc(group.teeTime)}</h3>
+      </div>
       <table class="sc">
         <tr><th class="name">Hole</th>${holesOut.map((h:any)=>`<th>${h.n}</th>`).join('')}<th>OUT</th>${holesIn.map((h:any)=>`<th>${h.n}</th>`).join('')}<th>IN</th><th>TOT</th></tr>
         <tr><td class="name">Par</td>${holesOut.map((h:any)=>`<td>${h.par}</td>`).join('')}<td>${holesOut.reduce((a:number,h:any)=>a+h.par,0)}</td>${holesIn.map((h:any)=>`<td>${h.par}</td>`).join('')}<td>${holesIn.reduce((a:number,h:any)=>a+h.par,0)}</td><td>${round.par}</td></tr>
@@ -1395,7 +1439,10 @@ function initApp() {
     const holesIn = round.holes.filter((h:any)=>h.n>9);
     return `
       <div class="card print-page">
-        <h3 style="margin-bottom:2px;">${is2v2? '2v2 Scorecard' : 'Blank Scorecard'}</h3>
+        <div class="scorecard-header">
+          <img src="/logo.png" alt="Trip logo"/>
+          <h3 style="margin:0;">${is2v2? '2v2 Scorecard' : 'Blank Scorecard'}</h3>
+        </div>
         ${is2v2? `<div style="font-size:11px;color:var(--text-secondary);margin-bottom:10px;">Dots show strokes given for the 2v2 match, based on the lowest handicap in this foursome — not the tournament net leaderboard.</div>` : ''}
         <div style="font-size:12px;margin-bottom:8px;">${esc(round.course)} · ${esc(group.teeTime)} · ${group.players.join(', ')}</div>
         <table class="sc" style="margin-bottom:10px;">${holeBlock(holesOut)}</table>
