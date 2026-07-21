@@ -123,3 +123,32 @@ export function pickPlayerLine(name: string): string | null {
   if (!lines || !lines.length) return null;
   return lines[Math.floor(Math.random() * lines.length)];
 }
+
+// ---- automatic feed posts triggered by live scoring events ----
+// Everything about the "⛳ Live Update" system-authored posts — which
+// triggers are on, the point thresholds, and the message wording — lives
+// here so any of it can be tweaked later without touching the trigger
+// logic in app/page.tsx. Saturday (AM + PM) only; Friday is intentionally
+// excluded from all of these in this batch.
+export const AUTO_POST_CONFIG = {
+  authorName: '⛳ Live Update',
+  enabled: {
+    birdie: true,
+    eagle: true,
+    matchClinched: true,
+    bigLeadMilestone: true,
+  },
+  // Lead (in holes) a team must reach for the "pulling away" milestone —
+  // fires once per match, the first time a lead reaches this size.
+  bigLeadThreshold: 3,
+  templates: {
+    birdie: (player: string, hole: number) => `🐦 ${player} birdies hole ${hole}!`,
+    eagle: (player: string, hole: number) => `🦅 ${player} EAGLE on hole ${hole}!!`,
+    matchClinched: (winningTeam: string, losingTeam: string, margin: number, holesRemaining: number) =>
+      holesRemaining > 0
+        ? `🏆 ${winningTeam} close it out, ${margin} and ${holesRemaining} over ${losingTeam}.`
+        : `🏆 ${winningTeam} close it out, ${margin} UP over ${losingTeam}.`,
+    bigLeadMilestone: (leadingTeam: string, trailingTeam: string, margin: number) =>
+      `📈 ${leadingTeam} pulling away, now ${margin} UP on ${trailingTeam}.`,
+  },
+};

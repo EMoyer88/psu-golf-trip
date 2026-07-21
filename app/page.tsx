@@ -9,7 +9,7 @@ import {
   Player, RoundGroup,
 } from '@/lib/tripData';
 import {
-  LEADERBOARD_FLAVOR, EMPTY_STATES, LAST_PLACE_LABEL, MATCH_COMMENTARY,
+  LEADERBOARD_FLAVOR, EMPTY_STATES, LAST_PLACE_LABEL, MATCH_COMMENTARY, AUTO_POST_CONFIG,
   pickMatchCommentary, pickPlayerLine,
 } from '@/lib/trashTalk';
 
@@ -55,6 +55,7 @@ function initApp() {
     expenses: [],
     payments: [],
     chat: [],
+    autoPostFlags: {},
     loaded:false,
     activeRoundId: autoRoundId(),
     activeGroupId: null,
@@ -90,6 +91,7 @@ function initApp() {
     const ex = await kvGet('expenses'); if(ex) state.expenses = ex;
     const pay = await kvGet('payments'); if(pay) state.payments = pay;
     const ch = await kvGet('chat'); if(ch) state.chat = ch;
+    const apf = await kvGet('auto-post-flags'); if(apf) state.autoPostFlags = apf;
 
     const { data } = await supabase.auth.getSession();
     state.authUser = data.session ? { id: data.session.user.id, email: data.session.user.email } : null;
@@ -115,6 +117,7 @@ function initApp() {
     kvSubscribe('expenses', (v)=>{ state.expenses = v; render(); });
     kvSubscribe('payments', (v)=>{ state.payments = v; render(); });
     kvSubscribe('chat', (v)=>{ state.chat = v; render(); });
+    kvSubscribe('auto-post-flags', (v)=>{ state.autoPostFlags = v; });
     kvSubscribe('trip-config', (v)=>{ state.config = v; recomputeSession(); render(); });
   }
 
@@ -125,6 +128,7 @@ function initApp() {
   function saveExpenses(){ kvSet('expenses', state.expenses); }
   function savePayments(){ kvSet('payments', state.payments); }
   function saveChat(){ kvSet('chat', state.chat); }
+  function saveAutoPostFlags(){ kvSet('auto-post-flags', state.autoPostFlags); }
 
   // ---- roster / groups ----
   function allPlayers(): Player[] { return state.config.roster; }
@@ -332,6 +336,44 @@ function initApp() {
     if(!state.scores[k]) state.scores[k] = {};
     state.scores[k][player] = val;
     saveScores();
+    // Tied directly to this one score-entry action (covers both the normal
+    // and admin scoring paths, since both call setScore) — never on
+    // render, so editing/correcting a score can't spam the feed by itself.
+    checkBirdieEagleAutoPost(roundId, hole, player, val);
+    checkMatchMilestoneAutoPosts(roundId);
+  }
+
+  // ---- automatic "⛳ Live Update" feed posts for live scoring events ----
+  // Saturday (AM + PM) only, per lib/trashTalk.ts's AUTO_POST_CONFIG.
+  function pushAutoPost(text:string){
+    const id = Date.now()+'-'+Math.random().toString(36).slice(2,7);
+    const time = new Date().toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
+    state.chat.push({ id, author: AUTO_POST_CONFIG.authorName, isAuto:true, text, time, reactions:{}, replies:[] });
+    saveChat();
+  }
+  // Birdie/eagle: tracks the CURRENT event type per (round, hole, player)
+  // key. Re-saving the same value is a no-op (type unchanged). Editing away
+  // from a birdie/eagle clears the flag without posting. Editing INTO one —
+  // whether fresh or a correction — posts, since the stored type changed.
+  function checkBirdieEagleAutoPost(roundId:string, hole:number, player:string, val:number){
+    if(roundId==='fri') return; // Saturday only in this batch
+    const round = roundOf(roundId);
+    const h = round.holes.find(hh=>hh.n===hole);
+    if(!h) return;
+    const diff = val - h.par;
+    const newType: 'eagle'|'birdie'|null = diff<=-2 ? 'eagle' : diff===-1 ? 'birdie' : null;
+    const key = `${roundId}-h${hole}-${player}`;
+    const prevType = state.autoPostFlags[key] || null;
+    if(newType===prevType) return;
+    state.autoPostFlags[key] = newType;
+    saveAutoPostFlags();
+    if(newType && (AUTO_POST_CONFIG.enabled as any)[newType]){
+      const line = pickPlayerLine(player);
+      const base = newType==='eagle'
+        ? AUTO_POST_CONFIG.templates.eagle(player, hole)
+        : AUTO_POST_CONFIG.templates.birdie(player, hole);
+      pushAutoPost(line ? `${base} ${line}` : base);
+    }
   }
   function toParFor(roundId:string, player:string){
     const round = roundOf(roundId);
@@ -509,6 +551,61 @@ function initApp() {
     if(result.diff===0) return { text:'ALL SQUARE', leader:null, clinched:false };
     const teamLabel = result.diff>0 ? result.a.join(' & ') : result.b.join(' & ');
     return { text:`${teamLabel} ${Math.abs(result.diff)} UP`, leader: result.diff>0?'A':'B', clinched:false };
+  }
+  // Saturday 2v2 "⛳ Live Update" posts: match clinched, and the first time
+  // a lead reaches AUTO_POST_CONFIG.bigLeadThreshold holes. Runs for every
+  // foursome in the round after any score change in that round (cheap —
+  // at most 3 foursomes). Match-clinched can re-fire if a later correction
+  // un-clinches and then re-clinches the match (a genuinely new result);
+  // the big-lead milestone is a true one-shot per match, per the spec, and
+  // is never re-armed even if the lead dips back down.
+  function checkMatchMilestoneAutoPosts(roundId:string){
+    if(roundId!=='satam' && roundId!=='satpm') return; // Saturday only
+    groupsForRound(roundId).forEach(g=>{
+      const result = twoVTwoResults(roundId, g);
+      if(!result) return;
+      const status = matchStatusText(result);
+      const baseKey = `${roundId}-${g.id}`;
+
+      if(AUTO_POST_CONFIG.enabled.matchClinched){
+        const clinchKey = `${baseKey}-clinched`;
+        const wasClinched = !!state.autoPostFlags[clinchKey];
+        if(status.clinched && !wasClinched){
+          state.autoPostFlags[clinchKey] = true;
+          saveAutoPostFlags();
+          const winningTeam = status.leader==='A' ? result.a.join(' & ') : result.b.join(' & ');
+          const losingTeam = status.leader==='A' ? result.b.join(' & ') : result.a.join(' & ');
+          const losingPlayers = status.leader==='A' ? result.b : result.a;
+          const holesRemaining = result.clinchedAtHole!=null ? 18-result.clinchedAtHole : 0;
+          const margin = Math.abs(result.diff);
+          const base = AUTO_POST_CONFIG.templates.matchClinched(winningTeam, losingTeam, margin, holesRemaining);
+          const line = pickMatchCommentary('clinched', losingPlayers);
+          pushAutoPost(line ? `${base} ${line}` : base);
+        } else if(!status.clinched && wasClinched){
+          state.autoPostFlags[clinchKey] = false; // allow a genuine later re-clinch to post again
+          saveAutoPostFlags();
+        }
+      }
+
+      // Once the match is decided, "pulling away" no longer makes sense —
+      // and this also avoids double-posting a milestone and a clinch
+      // announcement for the same hole in a late, fast-closing match.
+      if(AUTO_POST_CONFIG.enabled.bigLeadMilestone && !status.clinched){
+        const leadKey = `${baseKey}-bigLead`;
+        const alreadyFired = !!state.autoPostFlags[leadKey];
+        if(!alreadyFired && Math.abs(result.diff) >= AUTO_POST_CONFIG.bigLeadThreshold){
+          state.autoPostFlags[leadKey] = true;
+          saveAutoPostFlags();
+          const leaderIsA = result.diff>0;
+          const leadingTeam = leaderIsA ? result.a.join(' & ') : result.b.join(' & ');
+          const trailingTeam = leaderIsA ? result.b.join(' & ') : result.a.join(' & ');
+          const trailingPlayers = leaderIsA ? result.b : result.a;
+          const base = AUTO_POST_CONFIG.templates.bigLeadMilestone(leadingTeam, trailingTeam, Math.abs(result.diff));
+          const line = pickMatchCommentary('trailingBig', trailingPlayers);
+          pushAutoPost(line ? `${base} ${line}` : base);
+        }
+      }
+    });
   }
   // Hole-by-hole replay of a 2v2 match — same rules/clinch logic as
   // twoVTwoResults, but returns a per-hole record (gross scores, per-hole
@@ -1600,16 +1697,25 @@ function initApp() {
   }
 
   function renderFeedMessage(m:any){
+    const isAuto = !!m.isAuto;
     const authorP = m.author ? findPlayerObj(m.author) : null;
     const replies = m.replies || [];
     const replying = state.replyingToId === m.id;
+    // Auto-posts get their own avatar (a golf flag, since they're not a
+    // roster player), a tinted card, and an "AUTO" badge so it's never
+    // mistaken for a real person posting.
+    const avatarBlock = isAuto
+      ? `<div style="width:26px;height:26px;border-radius:50%;flex:0 0 auto;background:var(--navy);color:#fff;display:flex;align-items:center;justify-content:center;font-size:13px;">⛳</div>`
+      : avatarHtml(authorP, 26);
     return `
-      <div class="msg">
+      <div class="msg" style="${isAuto?'background:var(--navy-light);border-color:var(--navy);':''}">
         <div style="display:flex;align-items:center;gap:8px;">
-          ${avatarHtml(authorP, 26)}
-          <span class="author">${esc(m.author||'Someone')}</span><span class="time">${esc(m.time||'')}</span>
+          ${avatarBlock}
+          <span class="author" style="${isAuto?'color:var(--navy);':''}">${esc(m.author||'Someone')}</span>
+          ${isAuto? `<span class="pill" style="font-size:9px;">AUTO</span>` : ''}
+          <span class="time">${esc(m.time||'')}</span>
         </div>
-        <div style="font-size:14px;margin-top:4px;clear:both;">${esc(m.text||'')}</div>
+        <div style="font-size:14px;margin-top:4px;clear:both;${isAuto?'font-weight:600;':''}">${esc(m.text||'')}</div>
         ${m.photo? `<img src="${m.photo}"/>` : ''}
         ${m.video? `<video src="${m.video}" controls playsinline style="width:100%;border-radius:8px;margin-top:6px;"></video>` : ''}
         <div style="display:flex;gap:2px;margin-top:8px;flex-wrap:wrap;align-items:center;">
