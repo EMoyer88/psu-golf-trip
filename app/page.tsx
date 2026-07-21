@@ -289,10 +289,16 @@ function initApp() {
     if(!p) return 0;
     return strokesForHole((p.handicap||0) - fridayLowHandicap(), si);
   }
-  // Friday's 4-player vs 3-player best-ball match: each team's score for a
-  // hole is the sum of its own best 2 net scores (regardless of team size).
-  // Lower sum wins the hole; ties halve it. Separate model from twoVTwoResults
-  // on purpose — team sizes differ and "how many balls count" differs too.
+  // Friday's 4-player vs 3-player best-ball match: TWO independent points
+  // are available per hole (regardless of team size — the 3-player team
+  // still only counts its best 2 balls for the Low Total point):
+  //   1. Low Ball — each team's single lowest net score head-to-head.
+  //   2. Low Total — each team's best-2-net-scores sum head-to-head.
+  // Each point is decided separately; an exact tie on that point is a PUSH
+  // (no point to either team — NOT a 0.5/0.5 halve). So a hole can produce
+  // 2-0, 1-1, 1-0-with-a-push, or 0-0. Tracked as a running cumulative
+  // point total per team, independent of Saturday's Ryder-Cup-style match
+  // play and the tournament net leaderboard.
   function fridayBestBallResult(){
     const groups = groupsForRound('fri');
     if(groups.length<2) return null;
@@ -306,11 +312,13 @@ function initApp() {
       const allPlayers = [...teamBig.players, ...teamSmall.players];
       if(allPlayers.some((p:string)=>sc[p]==null)) return;
       holesPlayed++;
-      const netBig = teamBig.players.map((p:string)=>sc[p]-fridayBestBallStrokesForHole(p, round.si[idx])).sort((a,b)=>a-b).slice(0,2);
-      const netSmall = teamSmall.players.map((p:string)=>sc[p]-fridayBestBallStrokesForHole(p, round.si[idx])).sort((a,b)=>a-b).slice(0,2);
-      const sumBig = netBig[0]+netBig[1];
-      const sumSmall = netSmall[0]+netSmall[1];
-      if(sumBig<sumSmall) ptsBig+=1; else if(sumSmall<sumBig) ptsSmall+=1; else { ptsBig+=0.5; ptsSmall+=0.5; }
+      const netBig = teamBig.players.map((p:string)=>sc[p]-fridayBestBallStrokesForHole(p, round.si[idx])).sort((a,b)=>a-b);
+      const netSmall = teamSmall.players.map((p:string)=>sc[p]-fridayBestBallStrokesForHole(p, round.si[idx])).sort((a,b)=>a-b);
+      // Point 1: Low Ball — single lowest net score per team.
+      if(netBig[0]<netSmall[0]) ptsBig+=1; else if(netSmall[0]<netBig[0]) ptsSmall+=1; // equal = push
+      // Point 2: Low Total — best 2 net scores summed per team.
+      const totalBig = netBig[0]+netBig[1], totalSmall = netSmall[0]+netSmall[1];
+      if(totalBig<totalSmall) ptsBig+=1; else if(totalSmall<totalBig) ptsSmall+=1; // equal = push
     });
     return {teamBig: teamBig.players, teamSmall: teamSmall.players, ptsBig, ptsSmall, holesPlayed};
   }
@@ -541,6 +549,17 @@ function initApp() {
     return { a, b, rows, finalDiff:diff, clinchedAtHole };
   }
   function esc(s:any){ return String(s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'} as any)[c]); }
+  // Standard competition ranking ("1224") for an already-sorted list: tied
+  // items (per isTied) share the same rank number, and the next distinct
+  // rank skips ahead by however many were tied (e.g. 1,1,1,4 not 1,1,1,2).
+  function computeSharedRanks(items:any[], isTied:(a:any,b:any)=>boolean): number[] {
+    const ranks: number[] = [];
+    items.forEach((item,i)=>{
+      if(i>0 && isTied(items[i-1], item)) ranks.push(ranks[i-1]);
+      else ranks.push(i+1);
+    });
+    return ranks;
+  }
   function fmtMoney(n:number){ return '$' + (Math.round(n*100)/100).toFixed(2); }
 
   function computeBalances(){
@@ -548,8 +567,14 @@ function initApp() {
     const balances: any = {};
     players.forEach(p=>balances[p]=0);
     state.expenses.forEach((e:any)=>{
-      const share = e.amount / e.splitAmong.length;
-      e.splitAmong.forEach((p:string)=> balances[p] = (balances[p]||0) - share);
+      if(e.shares){
+        // Custom split — use each person's actual stored dollar share
+        // instead of assuming an even split.
+        Object.entries(e.shares).forEach(([p,amt]:any)=>{ balances[p] = (balances[p]||0) - amt; });
+      } else {
+        const share = e.amount / e.splitAmong.length;
+        e.splitAmong.forEach((p:string)=> balances[p] = (balances[p]||0) - share);
+      }
       balances[e.paidBy] = (balances[e.paidBy]||0) + e.amount;
     });
     state.payments.forEach((pmt:any)=>{
@@ -573,6 +598,47 @@ function initApp() {
       if(creditors[j].amt<0.01) j++;
     }
     return txns;
+  }
+
+  // ---- custom (uneven) expense split UI ----
+  // Rebuilds and refreshes via direct DOM manipulation rather than a full
+  // render() cycle, so toggling split mode or a participant mid-form-fill
+  // never resets whatever else the user has already typed into this form.
+  function rebuildExpenseCustomAmounts(){
+    const container = document.getElementById('exp-custom-amounts');
+    if(!container) return;
+    const customChip = document.getElementById('exp-split-mode-custom');
+    const isCustom = !!(customChip && !customChip.classList.contains('off'));
+    if(!isCustom){ container.style.display='none'; container.innerHTML=''; return; }
+    container.style.display='block';
+    const selectedChips = Array.from(document.querySelectorAll('#exp-split .chip:not(.off)'));
+    const selected = selectedChips.map((c:any)=>c.dataset.player);
+    // Preserve anything already typed for players still selected.
+    const existing: any = {};
+    container.querySelectorAll('input[data-player]').forEach((inp:any)=>{ existing[inp.dataset.player] = inp.value; });
+    const totalAmount = parseFloat((document.getElementById('exp-amount') as HTMLInputElement).value) || 0;
+    const evenShare = selected.length>0 ? totalAmount/selected.length : 0;
+    container.innerHTML = selected.map((p:string)=>{
+      const val = (existing[p]!=null && existing[p]!=='') ? existing[p] : (evenShare>0 ? evenShare.toFixed(2) : '');
+      return `
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="flex:1;font-size:13px;">${esc(p)}</span>
+        <input type="number" step="0.01" class="exp-share-input" data-player="${esc(p)}" value="${esc(val)}" style="width:90px;"/>
+      </div>`;
+    }).join('') + `<div id="exp-remaining" style="font-size:12px;font-weight:700;margin-top:4px;"></div>`;
+    container.querySelectorAll('.exp-share-input').forEach((inp:any)=>{ inp.oninput = updateExpenseRemaining; });
+    updateExpenseRemaining();
+  }
+  function updateExpenseRemaining(){
+    const remainingEl = document.getElementById('exp-remaining');
+    if(!remainingEl) return;
+    const totalAmount = parseFloat((document.getElementById('exp-amount') as HTMLInputElement).value) || 0;
+    const inputs = Array.from(document.querySelectorAll('#exp-custom-amounts .exp-share-input')) as HTMLInputElement[];
+    const sum = inputs.reduce((s,inp)=> s + (parseFloat(inp.value)||0), 0);
+    const remaining = Math.round((totalAmount - sum)*100)/100;
+    const matches = Math.abs(remaining) < 0.005;
+    remainingEl.textContent = matches ? 'Fully allocated ✓' : `Remaining to allocate: ${fmtMoney(remaining)}`;
+    remainingEl.style.color = matches ? 'var(--success-text)' : 'var(--danger-text)';
   }
 
   function icon(name:string){
@@ -1156,10 +1222,14 @@ function initApp() {
     let mulliganList = allPlayerNames().map(p=>({p, n:mulligansForRounds(SAT_ROUND_IDS,p)}))
       .filter(x=>x.n>0).sort((a,b)=>b.n-a.n);
 
+    // Ranked by eagle count first, birdie count as the tiebreaker — NOT the
+    // composite score, so e.g. 1 eagle/0 birdies always outranks 0
+    // eagles/2 birdies even though eagles*2+birdies would tie them.
     const bePlayers = allPlayerNames().map(p=>{
       const be = birdieEagleCount(p);
       return {p, ...be, score: be.eagles*2+be.birdies};
-    }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score);
+    }).filter(x=>x.score>0).sort((a,b)=> b.eagles-a.eagles || b.birdies-a.birdies);
+    const beRanks = computeSharedRanks(bePlayers, (a,b)=>a.eagles===b.eagles && a.birdies===b.birdies);
 
     // 2v2 match play stays per-round (three foursomes each for AM and PM).
     const teamGames = groupsForRound(round.id).map((g)=>({g, result: twoVTwoResults(round.id, g)})).filter((x:any)=>x.result);
@@ -1227,7 +1297,7 @@ function initApp() {
 
         ${miniList('birdies','🐦 Birdies &amp; 🦅 eagles', bePlayers, (x:any,i:number)=>`
           <div class="row" style="padding:4px 0;border-bottom:1px solid var(--border);">
-            <span style="font-size:12.5px;display:flex;align-items:center;gap:6px;"><b>${i+1}.</b> ${nameCell(x.p)}</span>
+            <span style="font-size:12.5px;display:flex;align-items:center;gap:6px;"><b>${beRanks[i]}.</b> ${nameCell(x.p)}</span>
             <span style="font-size:11.5px;">${x.birdies}b · ${x.eagles}e</span>
           </div>`, EMPTY_STATES.leaderboard)}
       </div>
@@ -1248,17 +1318,17 @@ function initApp() {
     }
     return `
       <div class="card">
-        <h3>🏌️ Friday best-ball — net (best 2 balls per team)</h3>
+        <h3>🏌️ Friday best-ball — net (2 pts/hole: Low Ball + Low Total)</h3>
         <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px;">4-some vs 3-some · thru ${result.holesPlayed} holes</div>
         <div class="matchup">
           <div class="teamcol ${bigLeads?'leading':''}">
             <div class="teamnames">${names(result.teamBig)}</div>
-            <div class="teampts">${result.ptsBig}</div>
+            <div class="teampts">${result.ptsBig} <span style="font-size:11px;font-weight:600;">pts</span></div>
           </div>
           <div class="vs">VS</div>
           <div class="teamcol ${smallLeads?'leading':''}">
             <div class="teamnames">${names(result.teamSmall)}</div>
-            <div class="teampts">${result.ptsSmall}</div>
+            <div class="teampts">${result.ptsSmall} <span style="font-size:11px;font-weight:600;">pts</span></div>
           </div>
         </div>
       </div>
@@ -1424,6 +1494,11 @@ function initApp() {
         <div id="exp-split" style="display:flex;flex-wrap:wrap;">
           ${players.map(p=>`<span class="chip" data-toggle-split data-player="${esc(p)}">${esc(p)}</span>`).join('')}
         </div>
+        <div style="display:flex;gap:6px;margin-top:8px;">
+          <span class="chip" id="exp-split-mode-even" data-action="set-expense-split-mode" data-mode="even">Split evenly</span>
+          <span class="chip off" id="exp-split-mode-custom" data-action="set-expense-split-mode" data-mode="custom">Custom split</span>
+        </div>
+        <div id="exp-custom-amounts" style="display:none;margin-top:10px;"></div>
         <label class="field">Receipt photo (optional)</label>
         <input type="file" id="exp-photo" accept="image/*"/>
         <button class="btn primary block" data-action="add-expense" style="margin-top:12px;">Add expense</button>
@@ -1462,7 +1537,7 @@ function initApp() {
           state.expenses.slice().reverse().map((e:any)=>`
           <div style="padding:8px 0;border-bottom:1px solid var(--border);">
             <div class="row">
-              <span style="font-size:13px;">${esc(e.desc)} <span style="color:var(--text-muted);">— paid by ${esc(e.paidBy)}</span></span>
+              <span style="font-size:13px;">${esc(e.desc)} <span style="color:var(--text-muted);">— paid by ${esc(e.paidBy)}</span>${e.shares?' <span class="pill" style="font-size:9px;">custom split</span>':''}</span>
               <span style="font-size:13px;font-weight:600;">${fmtMoney(e.amount)}</span>
             </div>
             ${e.receiptUrl? `<img src="${e.receiptUrl}" style="max-width:120px;border-radius:8px;margin-top:6px;"/>` : ''}
@@ -1911,7 +1986,10 @@ function initApp() {
 
     const videoEl = document.getElementById('mull-video') as HTMLVideoElement;
     navigator.mediaDevices.getUserMedia({
-      video: { facingMode:'user', width:{ideal:640}, height:{ideal:854}, frameRate:{ideal:24} },
+      // Rear-facing by default — whoever's recording is filming someone
+      // else's mulligan, not themselves. (Separate from and does not
+      // affect the selfie/avatar capture flow, which stays front-facing.)
+      video: { facingMode:'environment', width:{ideal:640}, height:{ideal:854}, frameRate:{ideal:24} },
       audio: true,
     }).then((stream)=>{
       videoEl.srcObject = stream;
@@ -2198,6 +2276,11 @@ function initApp() {
         savePayments();
         render();
       }; }
+      if(action==='set-expense-split-mode'){ el.onclick=()=>{
+        document.getElementById('exp-split-mode-even')!.classList.toggle('off', el.dataset.mode!=='even');
+        document.getElementById('exp-split-mode-custom')!.classList.toggle('off', el.dataset.mode!=='custom');
+        rebuildExpenseCustomAmounts();
+      }; }
       if(action==='add-expense'){ el.onclick=async ()=>{
         const desc = (document.getElementById('exp-desc') as HTMLInputElement).value.trim();
         const amount = parseFloat((document.getElementById('exp-amount') as HTMLInputElement).value);
@@ -2205,13 +2288,35 @@ function initApp() {
         const splitChips = document.querySelectorAll('#exp-split .chip:not(.off)');
         const splitAmong = Array.from(splitChips).map((c:any)=>c.dataset.player);
         if(!desc || !amount || splitAmong.length===0){ alert('Add a description, amount, and at least one person to split with.'); return; }
+        const customChip = document.getElementById('exp-split-mode-custom');
+        const isCustom = !!(customChip && !customChip.classList.contains('off'));
+        let shares: Record<string,number> | undefined;
+        if(isCustom){
+          const inputs = Array.from(document.querySelectorAll('#exp-custom-amounts .exp-share-input')) as HTMLInputElement[];
+          shares = {};
+          let sum = 0;
+          for(const inp of inputs){
+            const v = parseFloat(inp.value);
+            if(isNaN(v) || v<0){ alert('Enter a valid amount for every participant.'); return; }
+            const rounded = Math.round(v*100)/100;
+            shares[inp.dataset.player!] = rounded;
+            sum += rounded;
+          }
+          const diff = Math.round((amount-sum)*100)/100;
+          if(Math.abs(diff)>=0.01){
+            alert(`Custom amounts must add up to the total (${fmtMoney(amount)}). Currently ${diff>0?'short by '+fmtMoney(diff):'over by '+fmtMoney(-diff)}.`);
+            return;
+          }
+        }
         const photoInput = document.getElementById('exp-photo') as HTMLInputElement;
         let receiptUrl: string | null = null;
         if(photoInput.files && photoInput.files[0]){
           const compressed = await compressImage(photoInput.files[0]);
           receiptUrl = await uploadPhoto(compressed, 'receipts');
         }
-        state.expenses.push({desc, amount, paidBy, splitAmong, receiptUrl});
+        const record: any = {desc, amount, paidBy, splitAmong, receiptUrl};
+        if(shares) record.shares = shares;
+        state.expenses.push(record);
         saveExpenses();
         render();
       }; }
@@ -2277,7 +2382,19 @@ function initApp() {
         const splitChips = container ? container.querySelectorAll('.chip:not(.off)') : [];
         const splitAmong = Array.from(splitChips).map((c:any)=>c.dataset.player);
         if(!desc || !amount || splitAmong.length===0){ alert('Add a description, amount, and at least one person to split with.'); return; }
-        state.expenses[idx] = {...state.expenses[idx], desc, amount, paidBy, splitAmong};
+        const old = state.expenses[idx];
+        // This simple editor doesn't support editing custom per-person
+        // amounts directly — if the admin changes the total or who's
+        // included, a stale custom split would no longer add up correctly,
+        // so fall back to an even split rather than silently keeping it.
+        let shares = old.shares;
+        if(shares){
+          const shareNames = Object.keys(shares);
+          const sameParticipants = splitAmong.length===shareNames.length && splitAmong.every((p:string)=>shares[p]!=null);
+          const sameAmount = Math.abs((old.amount||0)-amount)<0.005;
+          if(!sameParticipants || !sameAmount) shares = undefined;
+        }
+        state.expenses[idx] = {...old, desc, amount, paidBy, splitAmong, shares};
         state.adminExpenseEditingId=null;
         saveExpenses(); render();
       }; }
@@ -2305,8 +2422,13 @@ function initApp() {
       }; }
     });
     document.querySelectorAll('[data-toggle-split]').forEach((el:any)=>{
-      el.onclick = ()=>{ el.classList.toggle('off'); };
+      el.onclick = ()=>{
+        el.classList.toggle('off');
+        if(el.closest('#exp-split')) rebuildExpenseCustomAmounts();
+      };
     });
+    const expAmountEl = document.getElementById('exp-amount');
+    if(expAmountEl) (expAmountEl as any).oninput = updateExpenseRemaining;
   }
 
   // ---- pull-to-refresh (Home + Leaders only; Score tab has its own
