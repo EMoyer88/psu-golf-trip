@@ -66,6 +66,8 @@ function initApp() {
     boardExpanded:{},
     boardRoundId: null,
     boardNetScorecardOpen:false,
+    matchScorecardRoundId: null,
+    matchScorecardGroupId: null,
     adminView:'scoring',
     adminRoundId: null,
     adminGroupId: null,
@@ -499,6 +501,44 @@ function initApp() {
     if(result.diff===0) return { text:'ALL SQUARE', leader:null, clinched:false };
     const teamLabel = result.diff>0 ? result.a.join(' & ') : result.b.join(' & ');
     return { text:`${teamLabel} ${Math.abs(result.diff)} UP`, leader: result.diff>0?'A':'B', clinched:false };
+  }
+  // Hole-by-hole replay of a 2v2 match — same rules/clinch logic as
+  // twoVTwoResults, but returns a per-hole record (gross scores, per-hole
+  // match strokes, hole winner, running status) for the match scorecard
+  // view instead of just the final summary. Holes past a clinch still show
+  // gross scores/strokes if entered, but no winner/status (match is over).
+  function twoVTwoHoleRows(roundId:string, group: RoundGroup){
+    const teams = teamsForGroup(group);
+    if(!teams || teams.a.length!==2 || teams.b.length!==2) return null;
+    const {a,b} = teams;
+    const round = roundOf(roundId);
+    let diff = 0;
+    let clinchedAtHole: number|null = null;
+    const players = [...a,...b];
+    const rows = round.holes.map((h:any)=>{
+      const idx = h.n-1;
+      const sc = getHoleScores(roundId,h.n);
+      const gross: any = {};
+      const strokes: any = {};
+      players.forEach((p:string)=>{
+        gross[p] = sc[p]!=null ? sc[p] : null;
+        strokes[p] = matchStrokesForHole(group, p, round.si[idx]);
+      });
+      const allScored = players.every((p:string)=>sc[p]!=null);
+      let winner: 'A'|'B'|'push'|null = null;
+      let statusAfter: string|null = null;
+      if(allScored && clinchedAtHole==null){
+        const aBest = Math.min(gross[a[0]]-strokes[a[0]], gross[a[1]]-strokes[a[1]]);
+        const bBest = Math.min(gross[b[0]]-strokes[b[0]], gross[b[1]]-strokes[b[1]]);
+        if(aBest<bBest){ diff+=1; winner='A'; } else if(bBest<aBest){ diff-=1; winner='B'; } else winner='push';
+        statusAfter = diff===0 ? 'AS' : (diff>0 ? `A +${diff}` : `B +${-diff}`);
+        const holesRemaining = 18 - h.n;
+        if(Math.abs(diff) > holesRemaining) clinchedAtHole = h.n;
+      }
+      const counted = (allScored && clinchedAtHole==null) || h.n===clinchedAtHole;
+      return { n:h.n, par:h.par, gross, strokes, winner, statusAfter, counted };
+    });
+    return { a, b, rows, finalDiff:diff, clinchedAtHole };
   }
   function esc(s:any){ return String(s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'} as any)[c]); }
   function fmtMoney(n:number){ return '$' + (Math.round(n*100)/100).toFixed(2); }
@@ -1020,12 +1060,26 @@ function initApp() {
       const tot = out+inn;
       return `<tr><td class="name">${esc(name)}</td>${outCells}<td><b>${out||''}</b></td>${inCells}<td><b>${inn||''}</b></td><td><b>${tot||''}</b></td></tr>`;
     }
+    // The current group's own 2v2 match status, shown alongside the gross
+    // scorecard so both can be checked in one place (Saturday only — no
+    // 2v2 game on Friday). Tournament net stroke dots aren't shown here;
+    // those live on the net leaderboard's own scorecard.
+    let matchStatusHtml = '';
+    if(round.id==='satam' || round.id==='satpm'){
+      const result = twoVTwoResults(round.id, group);
+      if(result && result.holesPlayed>0){
+        const status = matchStatusText(result);
+        const arrow = status.leader==='A' ? '◀ ' : status.leader==='B' ? '▶ ' : '';
+        matchStatusHtml = `<div style="text-align:center;font-weight:700;font-size:13px;color:${status.clinched?'var(--success-text)':'var(--navy)'};margin:2px 0 10px;">${arrow}${esc(status.text)}</div>`;
+      }
+    }
     return `
       <div style="overflow-x:auto;">
       <div class="scorecard-header">
         <img src="/logo.png" alt="Trip logo"/>
         <h3 style="margin:0;">${esc(round.course)} — ${esc(group.teeTime)}</h3>
       </div>
+      ${matchStatusHtml}
       <table class="sc">
         <tr><th class="name">Hole</th>${holesOut.map((h:any)=>`<th>${h.n}</th>`).join('')}<th>OUT</th>${holesIn.map((h:any)=>`<th>${h.n}</th>`).join('')}<th>IN</th><th>TOT</th></tr>
         <tr><td class="name">Par</td>${holesOut.map((h:any)=>`<td>${h.par}</td>`).join('')}<td>${holesOut.reduce((a:number,h:any)=>a+h.par,0)}</td>${holesIn.map((h:any)=>`<td>${h.par}</td>`).join('')}<td>${holesIn.reduce((a:number,h:any)=>a+h.par,0)}</td><td>${round.par}</td></tr>
@@ -1058,7 +1112,7 @@ function initApp() {
     return pickMatchCommentary(category, relevantPlayersFor(result, status));
   }
 
-  function renderTeamGameCard(g: RoundGroup, result:any){
+  function renderTeamGameCard(roundId:string, g: RoundGroup, result:any){
     const status = matchStatusText(result);
     const arrow = status.leader==='A' ? '◀ ' : status.leader==='B' ? '▶ ' : '';
     const commentary = commentaryFor(result, status);
@@ -1076,6 +1130,9 @@ function initApp() {
         </div>
         <div style="text-align:center;font-weight:700;font-size:13px;color:${status.clinched?'var(--success-text)':'var(--navy)'};margin-top:4px;">${arrow}${esc(status.text)}</div>
         ${commentary? `<div style="text-align:center;font-size:11px;font-style:italic;color:var(--text-muted);margin-top:2px;">${esc(commentary)}</div>` : ''}
+        <div style="text-align:center;">
+          <button class="link-btn" data-action="open-match-scorecard-modal" data-round="${esc(roundId)}" data-group="${esc(g.id)}" style="margin-top:4px;font-size:11px;">View scorecard ▾</button>
+        </div>
       </div>
     `;
   }
@@ -1141,7 +1198,7 @@ function initApp() {
         ${flavor? `<div style="font-size:10.5px;font-style:italic;color:var(--text-muted);margin-bottom:8px;">${esc(flavor)}</div>` : ''}
         ${items.length===0? `<div class="empty" style="padding:10px 4px;font-size:12px;">${emptyMsg}</div>` :
           shown.map(renderRow).join('')}
-        ${key==='net' ? renderNetScorecardToggle() : ''}
+        ${key==='net' ? `<button class="link-btn" data-action="open-net-scorecard-modal" style="margin-top:6px;font-size:11px;">View net scorecard ▾</button>` : ''}
         ${items.length>4 ? `<button class="link-btn" data-action="toggle-board-expand" data-key="${key}" style="margin-top:6px;font-size:11px;">${expanded?'Show less':'Show all '+items.length}</button>` : ''}
       </div>`;
     }
@@ -1154,7 +1211,7 @@ function initApp() {
       ${round.id==='fri' ? renderFridayBestBallCard() : (teamGames.length>0 ? `
       <div class="card">
         <h3>🏆 2v2 match play</h3>
-        ${teamGames.map(({g,result}:any)=>renderTeamGameCard(g,result)).join('')}
+        ${teamGames.map(({g,result}:any)=>renderTeamGameCard(round.id,g,result)).join('')}
       </div>` : `<div class="card"><div class="empty">The 2v2 game runs Saturday AM &amp; PM — set up teams in Admin &gt; Roster &amp; groups.</div></div>`)}
 
       <div class="grid2">
@@ -1174,6 +1231,9 @@ function initApp() {
             <span style="font-size:11.5px;">${x.birdies}b · ${x.eagles}e</span>
           </div>`, EMPTY_STATES.leaderboard)}
       </div>
+
+      ${state.boardNetScorecardOpen ? renderNetScorecardModal() : ''}
+      ${state.matchScorecardGroupId ? renderMatchScorecardModal() : ''}
     `;
   }
 
@@ -1205,15 +1265,94 @@ function initApp() {
     `;
   }
 
-  function renderNetScorecardToggle(){
-    const open = state.boardNetScorecardOpen;
+  // Small dot row reusing the exact stroke-dot style from the live scoring
+  // page, for showing per-hole handicap strokes inside a scorecard cell.
+  function strokeDotsCell(value:number|'', strokes:number){
+    if(value==='') return '<td></td>';
+    const dots = strokes>0 ? `<div style="display:flex;justify-content:center;gap:1px;margin-top:2px;">${'<span class="stroke-dot"></span>'.repeat(strokes)}</div>` : '';
+    return `<td><div>${value}</div>${dots}</td>`;
+  }
+
+  function renderNetScorecardModal(){
     return `
-      <button class="link-btn" data-action="toggle-net-scorecard" style="margin-top:6px;font-size:11px;">${open?'Hide net scorecard':'View net scorecard ▾'}</button>
-      ${open? renderCombinedNetScorecard(): ''}
+    <div class="modal-overlay" data-action="close-modals">
+      <div class="modal-sheet" onclick="event.stopPropagation()">
+        <div class="row" style="margin-bottom:10px;">
+          <span></span>
+          <button class="link-btn" data-action="close-modals">Close</button>
+        </div>
+        ${renderCombinedNetScorecard()}
+      </div>
+    </div>`;
+  }
+
+  function renderMatchScorecardModal(){
+    const roundId = state.matchScorecardRoundId;
+    const groupId = state.matchScorecardGroupId;
+    const group = roundId && groupId ? groupInRound(roundId, groupId) : null;
+    return `
+    <div class="modal-overlay" data-action="close-modals">
+      <div class="modal-sheet" onclick="event.stopPropagation()">
+        <div class="row" style="margin-bottom:10px;">
+          <span></span>
+          <button class="link-btn" data-action="close-modals">Close</button>
+        </div>
+        ${group ? renderMatchScorecard(roundOf(roundId), group) : '<div class="empty">This foursome could not be found.</div>'}
+      </div>
+    </div>`;
+  }
+  // Full 18-hole 2v2 match scorecard: gross scores, per-hole 2v2-match
+  // stroke dots (per-foursome low, NOT the tournament net allocation), which
+  // team won/pushed each hole, and the running Ryder-Cup-style status.
+  function renderMatchScorecard(round:any, group: RoundGroup){
+    const data = twoVTwoHoleRows(round.id, group);
+    if(!data){
+      return `<div class="empty">This foursome doesn't have 2v2 teams set up.</div>`;
+    }
+    const { a, b, rows } = data;
+    const players = [...a, ...b];
+    function cellHtml(r:any, p:string){
+      const g = r.gross[p];
+      if(g==null) return '<td></td>';
+      const s = r.strokes[p]||0;
+      const dots = s>0 ? `<div style="display:flex;justify-content:center;gap:1px;margin-top:2px;">${'<span class="stroke-dot"></span>'.repeat(s)}</div>` : '';
+      return `<td><div>${g}</div>${dots}</td>`;
+    }
+    function playerRow(p:string){
+      return `<tr><td class="name">${esc(p)}</td>${rows.map((r:any)=>cellHtml(r,p)).join('')}</tr>`;
+    }
+    function winnerCell(r:any){
+      if(!r.counted || !r.winner) return '<td></td>';
+      const label = r.winner==='push' ? '–' : r.winner;
+      const color = r.winner==='A' ? 'var(--navy)' : r.winner==='B' ? 'var(--success-text)' : 'var(--text-muted)';
+      return `<td style="font-weight:700;color:${color};">${label}</td>`;
+    }
+    function statusCell(r:any){
+      return `<td style="font-size:9px;">${r.counted && r.statusAfter ? esc(r.statusAfter) : ''}</td>`;
+    }
+    const finalStatus = matchStatusText(twoVTwoResults(round.id, group));
+    return `
+      <div style="overflow-x:auto;">
+        <div class="scorecard-header">
+          <img src="/logo.png" alt="Trip logo"/>
+          <h3 style="margin:0;">${esc(round.course)} — ${esc(group.teeTime)} · 2v2 match</h3>
+        </div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">${esc(a.join(' & '))} <b>vs</b> ${esc(b.join(' & '))}</div>
+        <table class="sc">
+          <tr><th class="name">Hole</th>${rows.map((r:any)=>`<th>${r.n}</th>`).join('')}</tr>
+          <tr><td class="name">Par</td>${rows.map((r:any)=>`<td>${r.par}</td>`).join('')}</tr>
+          ${players.map(playerRow).join('')}
+          <tr><td class="name">Won by</td>${rows.map(winnerCell).join('')}</tr>
+          <tr><td class="name">Match</td>${rows.map(statusCell).join('')}</tr>
+        </table>
+        <div style="text-align:center;font-weight:700;font-size:13px;color:${finalStatus.clinched?'var(--success-text)':'var(--navy)'};margin-top:10px;">${esc(finalStatus.text)}</div>
+        <div style="font-size:10px;color:var(--text-muted);margin-top:6px;">Dots show 2v2-match strokes — lowest handicap in this foursome plays scratch, separate from the tournament net leaderboard. "Won by" and "Match" stop once the match is clinched.</div>
+      </div>
     `;
   }
   // The net leaderboard is now a combined Saturday AM+PM 36-hole total, so
-  // its detail view shows each round's 18-hole net table plus a combined
+  // its detail view shows each round's 18-hole net table (with per-hole
+  // stroke dots — tournament-wide field-low allocation) plus a combined
   // 36-hole total row underneath.
   function renderCombinedNetScorecard(){
     const low = fieldLowHandicap();
@@ -1226,9 +1365,9 @@ function initApp() {
         return holes.map((h:any)=>{
           const idx = round.holes.findIndex((hh:any)=>hh.n===h.n);
           const s = getHoleScores(round.id,h.n)[p.name];
-          if(s==null) return {net:'' as any};
+          if(s==null) return {net:'' as any, strokes:0};
           const strokes = strokesForHole((p.handicap||0)-low, round.si[idx]);
-          return {net:s-strokes};
+          return {net:s-strokes, strokes};
         });
       }
       function row(p:Player){
@@ -1237,7 +1376,7 @@ function initApp() {
         outCells.forEach((c:any)=>{ if(c.net!=='') { outN+=c.net; anyOut=true; } });
         inCells.forEach((c:any)=>{ if(c.net!=='') { inN+=c.net; anyIn=true; } });
         const tot = (anyOut||anyIn) ? outN+inN : '';
-        return `<tr><td class="name">${esc(p.name)}</td>${outCells.map((c:any)=>`<td>${c.net}</td>`).join('')}<td><b>${anyOut?outN:''}</b></td>${inCells.map((c:any)=>`<td>${c.net}</td>`).join('')}<td><b>${anyIn?inN:''}</b></td><td><b>${tot}</b></td></tr>`;
+        return `<tr><td class="name">${esc(p.name)}</td>${outCells.map((c:any)=>strokeDotsCell(c.net,c.strokes)).join('')}<td><b>${anyOut?outN:''}</b></td>${inCells.map((c:any)=>strokeDotsCell(c.net,c.strokes)).join('')}<td><b>${anyIn?inN:''}</b></td><td><b>${tot}</b></td></tr>`;
       }
       return `
         <div style="font-size:11px;font-weight:700;color:var(--navy);margin:8px 0 2px;">${esc(round.label)}</div>
@@ -1255,11 +1394,15 @@ function initApp() {
       return `<tr><td class="name">${esc(p.name)}</td><td><b>${label}</b></td></tr>`;
     }).join('');
 
-    return `<div style="overflow-x:auto;margin-top:8px;">
+    return `<div style="overflow-x:auto;">
+      <div class="scorecard-header">
+        <img src="/logo.png" alt="Trip logo"/>
+        <h3 style="margin:0;">Tournament net scorecard</h3>
+      </div>
       ${SAT_ROUND_IDS.map(rid=>roundTable(roundOf(rid))).join('')}
       <div style="font-size:11px;font-weight:700;color:var(--navy);margin:10px 0 2px;">36-hole net to par</div>
       <table class="sc"><tr><th class="name">Player</th><th>Net to par</th></tr>${totalsRows}</table>
-      <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">Net = gross score minus tournament net strokes (handicap − field-low handicap ${esc(String(low))}, allocated by stroke index).</div>
+      <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">Net = gross score minus tournament net strokes (handicap − field-low handicap ${esc(String(low))}, allocated by stroke index). Dots show strokes received on that hole.</div>
     </div>`;
   }
 
@@ -1958,7 +2101,11 @@ function initApp() {
       if(action==='pick-group'){ el.onchange=()=>{ state.activeGroupId=el.value; state.pickerModalOpen=false; render(); }; }
       if(action==='open-picker-modal'){ el.onclick=()=>{ state.pickerModalOpen=true; render(); }; }
       if(action==='open-scorecard-modal'){ el.onclick=()=>{ state.scorecardModalOpen=!state.scorecardModalOpen; render(); }; }
-      if(action==='close-modals'){ el.onclick=()=>{ state.pickerModalOpen=false; state.scorecardModalOpen=false; state.beaverPanelOpen=false; state.mulliganPanelOpen=false; render(); }; }
+      if(action==='close-modals'){ el.onclick=()=>{
+        state.pickerModalOpen=false; state.scorecardModalOpen=false; state.beaverPanelOpen=false; state.mulliganPanelOpen=false;
+        state.boardNetScorecardOpen=false; state.matchScorecardRoundId=null; state.matchScorecardGroupId=null;
+        render();
+      }; }
       if(action==='set-score'){ el.onclick=()=>{
         setScore(state.activeRoundId, state.activeHole, el.dataset.player, parseInt(el.dataset.val,10));
         render();
@@ -1988,7 +2135,12 @@ function initApp() {
       if(action==='next-hole'){ el.onclick=()=>{ if(state.activeHole<18) state.activeHole++; render(); }; }
       if(action==='pick-board-round'){ el.onclick=()=>{ state.boardRoundId=el.dataset.round; render(); }; }
       if(action==='toggle-board-expand'){ el.onclick=()=>{ state.boardExpanded[el.dataset.key]=!state.boardExpanded[el.dataset.key]; render(); }; }
-      if(action==='toggle-net-scorecard'){ el.onclick=()=>{ state.boardNetScorecardOpen=!state.boardNetScorecardOpen; render(); }; }
+      if(action==='open-net-scorecard-modal'){ el.onclick=()=>{ state.boardNetScorecardOpen=true; render(); }; }
+      if(action==='open-match-scorecard-modal'){ el.onclick=()=>{
+        state.matchScorecardRoundId = el.dataset.round;
+        state.matchScorecardGroupId = el.dataset.group;
+        render();
+      }; }
       if(action==='react'){
         // Long-press (or press-and-hold with a mouse) shows who reacted instead
         // of toggling — a redundant path to the same info the count badge opens.
