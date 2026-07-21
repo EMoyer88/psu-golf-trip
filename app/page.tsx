@@ -8,6 +8,10 @@ import {
   strokesForHole, lowHandicapAmong, initialsFor,
   Player, RoundGroup,
 } from '@/lib/tripData';
+import {
+  LEADERBOARD_FLAVOR, EMPTY_STATES, LAST_PLACE_LABEL, MATCH_COMMENTARY,
+  pickMatchCommentary, pickPlayerLine,
+} from '@/lib/trashTalk';
 
 export default function Page() {
   const mounted = useRef(false);
@@ -66,6 +70,7 @@ function initApp() {
     adminGroupId: null,
     adminHole: 1,
     adminExpenseEditingId: null,
+    adminMulliganRoundId: null,
     printRoundId: null,
     printGroupId: null,
     printMode: 'one',
@@ -317,6 +322,30 @@ function initApp() {
     });
     return {diff, played};
   }
+  // Friday is a standalone exhibition round and never feeds the cumulative
+  // tournament leaderboard — Saturday AM + PM combine into one 36-hole total
+  // instead. Used for gross/net/mullies; birdieEagleCount below already only
+  // looks at trackBirdies rounds (satam+satpm), so it needs no change.
+  const SAT_ROUND_IDS = ['satam', 'satpm'];
+  function toParForRounds(roundIds:string[], player:string){
+    let diff=0, played=0;
+    roundIds.forEach(rid=>{
+      const r = toParFor(rid, player);
+      diff += r.diff; played += r.played;
+    });
+    return {diff, played};
+  }
+  function netToParForRounds(roundIds:string[], player:string){
+    let diff=0, played=0;
+    roundIds.forEach(rid=>{
+      const r = netToParFor(rid, player);
+      diff += r.diff; played += r.played;
+    });
+    return {diff, played};
+  }
+  function mulligansForRounds(roundIds:string[], player:string){
+    return roundIds.reduce((sum,rid)=>sum+getMulligans(rid,player),0);
+  }
   function birdieEagleCount(player:string){
     let birdies=0, eagles=0;
     ROUNDS.filter(r=>r.trackBirdies).forEach(r=>{
@@ -385,30 +414,68 @@ function initApp() {
     const b = group.players.filter(n=>group.teams![n]==='B');
     return {a,b};
   }
+  // Real match play, best ball only (no "low total" point). diff is a
+  // running differential: positive = Team A up, negative = Team B up, 0 =
+  // all square. Equal best-ball scores on a hole push — no point, no change
+  // to diff. Once abs(diff) exceeds the holes remaining after a hole, the
+  // match is mathematically clinched and we stop counting further holes,
+  // exactly like real match play (a clinch on the 18th hole itself reports
+  // as "N UP" rather than "N and 0", since there are 0 holes left to spare).
   function twoVTwoResults(roundId:string, group: RoundGroup){
     const teams = teamsForGroup(group);
     if(!teams || teams.a.length!==2 || teams.b.length!==2) return null;
     const {a,b} = teams;
     const round = roundOf(roundId);
-    let ptsA=0, ptsB=0, holesPlayed=0;
-    round.holes.forEach((h,idx)=>{
+    let diff = 0, holesPlayed = 0;
+    let clinchedAtHole: number|null = null;
+    let clinchedTeam: 'A'|'B'|null = null;
+    let leadChangedThisHole = false;
+    for(const h of round.holes){
+      if(clinchedAtHole!=null) break;
+      const idx = h.n-1;
       const sc = getHoleScores(roundId,h.n);
       const players=[...a,...b];
-      if(players.some((p:string)=>sc[p]==null)) return;
+      if(players.some((p:string)=>sc[p]==null)) break;
       holesPlayed++;
       const net: any = {};
       players.forEach((p:string)=>{
         const strokes = matchStrokesForHole(group, p, round.si[idx]);
         net[p] = sc[p]-strokes;
       });
-      const aMin = Math.min(net[a[0]], net[a[1]]);
-      const bMin = Math.min(net[b[0]], net[b[1]]);
-      if(aMin<bMin) ptsA+=1; else if(bMin<aMin) ptsB+=1; else { ptsA+=0.5; ptsB+=0.5; }
-      const aSum = net[a[0]]+net[a[1]];
-      const bSum = net[b[0]]+net[b[1]];
-      if(aSum<bSum) ptsA+=1; else if(bSum<aSum) ptsB+=1; else { ptsA+=0.5; ptsB+=0.5; }
-    });
-    return {a,b,ptsA,ptsB,holesPlayed};
+      const aBest = Math.min(net[a[0]], net[a[1]]);
+      const bBest = Math.min(net[b[0]], net[b[1]]);
+      const beforeLeader: 'A'|'B'|null = diff>0?'A':diff<0?'B':null;
+      if(aBest<bBest) diff+=1; else if(bBest<aBest) diff-=1; // equal = push, diff unchanged
+      const afterLeader: 'A'|'B'|null = diff>0?'A':diff<0?'B':null;
+      leadChangedThisHole = !!(beforeLeader && afterLeader && beforeLeader!==afterLeader);
+      const holesRemaining = 18 - h.n;
+      if(Math.abs(diff) > holesRemaining){
+        clinchedAtHole = h.n;
+        clinchedTeam = diff>0 ? 'A' : 'B';
+      }
+    }
+    return {a, b, diff, holesPlayed, clinchedAtHole, clinchedTeam, leadChangedThisHole};
+  }
+  // Human-readable Ryder-Cup-style status for a twoVTwoResults() result.
+  function matchStatusText(result:any){
+    if(result.holesPlayed===0) return { text:'Not started', leader:null as 'A'|'B'|null, clinched:false };
+    if(result.clinchedAtHole!=null){
+      const holesRemaining = 18 - result.clinchedAtHole;
+      const teamLabel = result.clinchedTeam==='A' ? result.a.join(' & ') : result.b.join(' & ');
+      const margin = Math.abs(result.diff);
+      const text = holesRemaining===0
+        ? `${teamLabel} win ${margin} UP`
+        : `${teamLabel} win ${margin} and ${holesRemaining}`;
+      return { text, leader: result.clinchedTeam, clinched:true };
+    }
+    if(result.holesPlayed>=18){
+      if(result.diff===0) return { text:'Match halved', leader:null, clinched:false };
+      const teamLabel = result.diff>0 ? result.a.join(' & ') : result.b.join(' & ');
+      return { text:`${teamLabel} win ${Math.abs(result.diff)} UP`, leader: result.diff>0?'A':'B', clinched:true };
+    }
+    if(result.diff===0) return { text:'ALL SQUARE', leader:null, clinched:false };
+    const teamLabel = result.diff>0 ? result.a.join(' & ') : result.b.join(' & ');
+    return { text:`${teamLabel} ${Math.abs(result.diff)} UP`, leader: result.diff>0?'A':'B', clinched:false };
   }
   function esc(s:any){ return String(s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'} as any)[c]); }
   function fmtMoney(n:number){ return '$' + (Math.round(n*100)/100).toFixed(2); }
@@ -748,6 +815,24 @@ function initApp() {
 
     const totalMulligans = group.players.reduce((a:number,name:string)=>a+getMulligans(round.id,name),0);
 
+    // Saturday 2v2 match status + rotating trash-talk commentary, shown
+    // right on the scoring screen (not just the leaderboard).
+    let matchBannerHtml = '';
+    if(round.id==='satam' || round.id==='satpm'){
+      const matchResult = twoVTwoResults(round.id, group);
+      if(matchResult && matchResult.holesPlayed>0){
+        const status = matchStatusText(matchResult);
+        const commentary = commentaryFor(matchResult, status);
+        const arrow = status.leader==='A' ? '◀ ' : status.leader==='B' ? '▶ ' : '';
+        matchBannerHtml = `
+          <div style="flex:0 0 auto;text-align:center;background:#fff;border:1px solid var(--border);border-radius:10px;padding:6px 10px;margin-bottom:8px;">
+            <div style="font-weight:700;font-size:12.5px;color:${status.clinched?'var(--success-text)':'var(--navy)'};">${arrow}${esc(status.text)}</div>
+            ${commentary? `<div style="font-size:10.5px;font-style:italic;color:var(--text-muted);margin-top:1px;">${esc(commentary)}</div>` : ''}
+          </div>
+        `;
+      }
+    }
+
     return `
       <div class="scoreholder">
         <div style="flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:6px 2px;">
@@ -761,7 +846,7 @@ function initApp() {
           <div class="holeinfo"><b>⛳ Hole ${hole.n}</b><br/>Par ${hole.par} · ${hole.yds} yds</div>
           <button class="navbtn" data-action="next-hole" ${hole.n>=18?'disabled':''}>›</button>
         </div>
-
+        ${matchBannerHtml}
         <div class="playersarea">
           ${group.players.map((name:string)=>{
             const p = findPlayerObj(name);
@@ -912,21 +997,68 @@ function initApp() {
     `;
   }
 
+  // Which players are most relevant to comment on for a given match state —
+  // the trailing team when someone's behind, the new leader on a lead
+  // change, the losing team once clinched, or everyone when all square.
+  function relevantPlayersFor(result:any, status:any){
+    if(status.clinched && result.clinchedTeam){
+      return result.clinchedTeam==='A' ? result.b : result.a; // losing team
+    }
+    if(result.leadChangedThisHole && status.leader){
+      return status.leader==='A' ? result.a : result.b; // team that just took the lead
+    }
+    if(status.leader===null) return [...result.a, ...result.b];
+    return status.leader==='A' ? result.b : result.a; // trailing team
+  }
+  function commentaryFor(result:any, status:any){
+    if(result.holesPlayed===0) return '';
+    let category: keyof typeof MATCH_COMMENTARY;
+    if(status.clinched) category = 'clinched';
+    else if(result.leadChangedThisHole && status.leader) category = 'leadChanged';
+    else if(status.leader===null) category = 'allSquare';
+    else category = Math.abs(result.diff)>=4 ? 'trailingBig' : 'trailingSmall';
+    return pickMatchCommentary(category, relevantPlayersFor(result, status));
+  }
+
+  function renderTeamGameCard(g: RoundGroup, result:any){
+    const status = matchStatusText(result);
+    const arrow = status.leader==='A' ? '◀ ' : status.leader==='B' ? '▶ ' : '';
+    const commentary = commentaryFor(result, status);
+    const aLeads = status.leader==='A', bLeads = status.leader==='B';
+    function names(list:string[]){
+      return list.map((n:string)=>`<span style="display:inline-flex;align-items:center;gap:4px;margin-right:6px;">${avatarHtml(findPlayerObj(n),20)}${esc(n)}</span>`).join('');
+    }
+    return `
+      <div style="margin-bottom:14px;">
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px;">${esc(g.teeTime)} · thru ${result.holesPlayed} holes</div>
+        <div class="matchup">
+          <div class="teamcol ${aLeads?'leading':''}"><div class="teamnames">${names(result.a)}</div></div>
+          <div class="vs">VS</div>
+          <div class="teamcol ${bLeads?'leading':''}"><div class="teamnames">${names(result.b)}</div></div>
+        </div>
+        <div style="text-align:center;font-weight:700;font-size:13px;color:${status.clinched?'var(--success-text)':'var(--navy)'};margin-top:4px;">${arrow}${esc(status.text)}</div>
+        ${commentary? `<div style="text-align:center;font-size:11px;font-style:italic;color:var(--text-muted);margin-top:2px;">${esc(commentary)}</div>` : ''}
+      </div>
+    `;
+  }
+
   function renderBoard(){
     const current = autoRoundId();
     const round = roundOf(state.boardRoundId || current);
 
+    // Combined Saturday (AM+PM) tournament totals — Friday is a standalone
+    // exhibition round and never contributes here.
     let grossList = allPlayerNames().map(p=>{
-      const {diff,played} = toParFor(round.id,p);
+      const {diff,played} = toParForRounds(SAT_ROUND_IDS,p);
       return {p,diff,played};
     }).filter(x=>x.played>0).sort((a,b)=>a.diff-b.diff);
 
     let netList = allPlayerNames().map(p=>{
-      const {diff,played} = netToParFor(round.id,p);
+      const {diff,played} = netToParForRounds(SAT_ROUND_IDS,p);
       return {p,diff,played};
     }).filter(x=>x.played>0).sort((a,b)=>a.diff-b.diff);
 
-    let mulliganList = allPlayerNames().map(p=>({p, n:getMulligans(round.id,p)}))
+    let mulliganList = allPlayerNames().map(p=>({p, n:mulligansForRounds(SAT_ROUND_IDS,p)}))
       .filter(x=>x.n>0).sort((a,b)=>b.n-a.n);
 
     const bePlayers = allPlayerNames().map(p=>{
@@ -934,22 +1066,44 @@ function initApp() {
       return {p, ...be, score: be.eagles*2+be.birdies};
     }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score);
 
+    // 2v2 match play stays per-round (three foursomes each for AM and PM).
     const teamGames = groupsForRound(round.id).map((g)=>({g, result: twoVTwoResults(round.id, g)})).filter((x:any)=>x.result);
+
+    const lastGrossName = grossList.length>1 ? grossList[grossList.length-1].p : null;
+    const lastNetName = netList.length>1 ? netList[netList.length-1].p : null;
 
     function nameCell(name:string){
       const p = findPlayerObj(name);
       return `${avatarHtml(p,22)}<span>${esc(name)}</span>`;
     }
+    function lastPlaceBadge(name:string){
+      const line = pickPlayerLine(name);
+      return ` <span title="${esc(line || LAST_PLACE_LABEL)}">🐌</span>`;
+    }
+    function leaderRow(x:any, i:number, lastName:string|null){
+      const isLast = lastName!=null && x.p===lastName;
+      const line = isLast ? pickPlayerLine(x.p) : null;
+      return `
+        <div style="padding:4px 0;border-bottom:1px solid var(--border);">
+          <div class="row">
+            <span style="font-size:12.5px;display:flex;align-items:center;gap:6px;"><b>${i+1}.</b> ${nameCell(x.p)}${isLast?lastPlaceBadge(x.p):''}</span>
+            <span style="font-size:12.5px;">${x.diff>0?'+':''}${x.diff}</span>
+          </div>
+          ${isLast && line ? `<div style="font-size:10px;font-style:italic;color:var(--text-muted);margin-top:2px;">${esc(line)}</div>` : ''}
+        </div>`;
+    }
 
     function miniList(key:string, title:string, items:any[], renderRow:any, emptyMsg:string){
       const expanded = !!state.boardExpanded[key];
       const shown = expanded ? items : items.slice(0,4);
+      const flavor = (LEADERBOARD_FLAVOR as any)[key];
       return `
       <div class="card" style="padding:12px 14px;">
-        <h3 style="font-size:13px;margin:0 0 8px;">${title}</h3>
+        <h3 style="font-size:13px;margin:0 0 2px;">${title}</h3>
+        ${flavor? `<div style="font-size:10.5px;font-style:italic;color:var(--text-muted);margin-bottom:8px;">${esc(flavor)}</div>` : ''}
         ${items.length===0? `<div class="empty" style="padding:10px 4px;font-size:12px;">${emptyMsg}</div>` :
           shown.map(renderRow).join('')}
-        ${key==='net' ? renderNetScorecardToggle(round) : ''}
+        ${key==='net' ? renderNetScorecardToggle() : ''}
         ${items.length>4 ? `<button class="link-btn" data-action="toggle-board-expand" data-key="${key}" style="margin-top:6px;font-size:11px;">${expanded?'Show less':'Show all '+items.length}</button>` : ''}
       </div>`;
     }
@@ -961,51 +1115,26 @@ function initApp() {
 
       ${round.id==='fri' ? renderFridayBestBallCard() : (teamGames.length>0 ? `
       <div class="card">
-        <h3>🏆 2v2 game — net (best ball + low total)</h3>
-        ${teamGames.map(({g,result}:any)=>{
-          const aLeads = result.ptsA>result.ptsB, bLeads = result.ptsB>result.ptsA;
-          return `
-          <div style="margin-bottom:4px;">
-            <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px;">${esc(g.teeTime)} · thru ${result.holesPlayed} holes</div>
-            <div class="matchup">
-              <div class="teamcol ${aLeads?'leading':''}">
-                <div class="teamnames">${result.a.map((n:string)=>`<span style="display:inline-flex;align-items:center;gap:4px;margin-right:6px;">${avatarHtml(findPlayerObj(n),20)}${esc(n)}</span>`).join('')}</div>
-                <div class="teampts">${result.ptsA}</div>
-              </div>
-              <div class="vs">VS</div>
-              <div class="teamcol ${bLeads?'leading':''}">
-                <div class="teamnames">${result.b.map((n:string)=>`<span style="display:inline-flex;align-items:center;gap:4px;margin-right:6px;">${avatarHtml(findPlayerObj(n),20)}${esc(n)}</span>`).join('')}</div>
-                <div class="teampts">${result.ptsB}</div>
-              </div>
-            </div>
-          </div>`;
-        }).join('')}
+        <h3>🏆 2v2 match play</h3>
+        ${teamGames.map(({g,result}:any)=>renderTeamGameCard(g,result)).join('')}
       </div>` : `<div class="card"><div class="empty">The 2v2 game runs Saturday AM &amp; PM — set up teams in Admin &gt; Roster &amp; groups.</div></div>`)}
 
       <div class="grid2">
-        ${miniList('gross','⛳ Best to par — gross', grossList, (x:any,i:number)=>`
-          <div class="row" style="padding:4px 0;border-bottom:1px solid var(--border);">
-            <span style="font-size:12.5px;display:flex;align-items:center;gap:6px;"><b>${i+1}.</b> ${nameCell(x.p)}</span>
-            <span style="font-size:12.5px;">${x.diff>0?'+':''}${x.diff}</span>
-          </div>`, 'No scores yet.')}
+        ${miniList('gross','⛳ Best to par — gross', grossList, (x:any,i:number)=>leaderRow(x,i,lastGrossName), EMPTY_STATES.leaderboard)}
 
-        ${miniList('net','🎯 Best to par — net', netList, (x:any,i:number)=>`
-          <div class="row" style="padding:4px 0;border-bottom:1px solid var(--border);">
-            <span style="font-size:12.5px;display:flex;align-items:center;gap:6px;"><b>${i+1}.</b> ${nameCell(x.p)}</span>
-            <span style="font-size:12.5px;">${x.diff>0?'+':''}${x.diff}</span>
-          </div>`, 'No scores yet.')}
+        ${miniList('net','🎯 Best to par — net', netList, (x:any,i:number)=>leaderRow(x,i,lastNetName), EMPTY_STATES.leaderboard)}
 
         ${miniList('mullies','🍺 Most Shotgun Mullies', mulliganList, (x:any,i:number)=>`
           <div class="row" style="padding:4px 0;border-bottom:1px solid var(--border);">
             <span style="font-size:12.5px;display:flex;align-items:center;gap:6px;"><b>${i+1}.</b> ${nameCell(x.p)}</span>
             <span style="font-size:12.5px;">${x.n}</span>
-          </div>`, 'None logged.')}
+          </div>`, EMPTY_STATES.mullies)}
 
         ${miniList('birdies','🐦 Birdies &amp; 🦅 eagles', bePlayers, (x:any,i:number)=>`
           <div class="row" style="padding:4px 0;border-bottom:1px solid var(--border);">
             <span style="font-size:12.5px;display:flex;align-items:center;gap:6px;"><b>${i+1}.</b> ${nameCell(x.p)}</span>
             <span style="font-size:11.5px;">${x.birdies}b · ${x.eagles}e</span>
-          </div>`, 'None yet.')}
+          </div>`, EMPTY_STATES.leaderboard)}
       </div>
     `;
   }
@@ -1038,41 +1167,60 @@ function initApp() {
     `;
   }
 
-  function renderNetScorecardToggle(round:any){
+  function renderNetScorecardToggle(){
     const open = state.boardNetScorecardOpen;
     return `
       <button class="link-btn" data-action="toggle-net-scorecard" style="margin-top:6px;font-size:11px;">${open?'Hide net scorecard':'View net scorecard ▾'}</button>
-      ${open? renderNetScorecardTable(round): ''}
+      ${open? renderCombinedNetScorecard(): ''}
     `;
   }
-  function renderNetScorecardTable(round:any){
-    const holesOut = round.holes.filter((h:any)=>h.n<=9);
-    const holesIn = round.holes.filter((h:any)=>h.n>9);
+  // The net leaderboard is now a combined Saturday AM+PM 36-hole total, so
+  // its detail view shows each round's 18-hole net table plus a combined
+  // 36-hole total row underneath.
+  function renderCombinedNetScorecard(){
     const low = fieldLowHandicap();
-    const players: Player[] = state.config.roster.filter((p:Player)=>toParFor(round.id,p.name).played>0);
-    function cellsFor(p:Player, holes:any[]){
-      return holes.map((h:any)=>{
-        const idx = round.holes.findIndex((hh:any)=>hh.n===h.n);
-        const s = getHoleScores(round.id,h.n)[p.name];
-        if(s==null) return {net:'' as any};
-        const strokes = strokesForHole((p.handicap||0)-low, round.si[idx]);
-        return {net:s-strokes};
-      });
+    const players: Player[] = state.config.roster.filter((p:Player)=>SAT_ROUND_IDS.some(rid=>toParFor(rid,p.name).played>0));
+
+    function roundTable(round:any){
+      const holesOut = round.holes.filter((h:any)=>h.n<=9);
+      const holesIn = round.holes.filter((h:any)=>h.n>9);
+      function cellsFor(p:Player, holes:any[]){
+        return holes.map((h:any)=>{
+          const idx = round.holes.findIndex((hh:any)=>hh.n===h.n);
+          const s = getHoleScores(round.id,h.n)[p.name];
+          if(s==null) return {net:'' as any};
+          const strokes = strokesForHole((p.handicap||0)-low, round.si[idx]);
+          return {net:s-strokes};
+        });
+      }
+      function row(p:Player){
+        const outCells = cellsFor(p,holesOut), inCells = cellsFor(p,holesIn);
+        let outN=0, inN=0, anyOut=false, anyIn=false;
+        outCells.forEach((c:any)=>{ if(c.net!=='') { outN+=c.net; anyOut=true; } });
+        inCells.forEach((c:any)=>{ if(c.net!=='') { inN+=c.net; anyIn=true; } });
+        const tot = (anyOut||anyIn) ? outN+inN : '';
+        return `<tr><td class="name">${esc(p.name)}</td>${outCells.map((c:any)=>`<td>${c.net}</td>`).join('')}<td><b>${anyOut?outN:''}</b></td>${inCells.map((c:any)=>`<td>${c.net}</td>`).join('')}<td><b>${anyIn?inN:''}</b></td><td><b>${tot}</b></td></tr>`;
+      }
+      return `
+        <div style="font-size:11px;font-weight:700;color:var(--navy);margin:8px 0 2px;">${esc(round.label)}</div>
+        <table class="sc">
+          <tr><th class="name">Hole</th>${holesOut.map((h:any)=>`<th>${h.n}</th>`).join('')}<th>OUT</th>${holesIn.map((h:any)=>`<th>${h.n}</th>`).join('')}<th>IN</th><th>TOT</th></tr>
+          <tr><td class="name">Par</td>${holesOut.map((h:any)=>`<td>${h.par}</td>`).join('')}<td>${holesOut.reduce((a:number,h:any)=>a+h.par,0)}</td>${holesIn.map((h:any)=>`<td>${h.par}</td>`).join('')}<td>${holesIn.reduce((a:number,h:any)=>a+h.par,0)}</td><td>${round.par}</td></tr>
+          ${players.map(row).join('')}
+        </table>
+      `;
     }
-    function row(p:Player){
-      const outCells = cellsFor(p,holesOut), inCells = cellsFor(p,holesIn);
-      let outN=0, inN=0, anyOut=false, anyIn=false;
-      outCells.forEach((c:any)=>{ if(c.net!=='') { outN+=c.net; anyOut=true; } });
-      inCells.forEach((c:any)=>{ if(c.net!=='') { inN+=c.net; anyIn=true; } });
-      const tot = (anyOut||anyIn) ? outN+inN : '';
-      return `<tr><td class="name">${esc(p.name)}</td>${outCells.map((c:any)=>`<td>${c.net}</td>`).join('')}<td><b>${anyOut?outN:''}</b></td>${inCells.map((c:any)=>`<td>${c.net}</td>`).join('')}<td><b>${anyIn?inN:''}</b></td><td><b>${tot}</b></td></tr>`;
-    }
+
+    const totalsRows = players.map(p=>{
+      const combined = netToParForRounds(SAT_ROUND_IDS, p.name);
+      const label = combined.played>0 ? (combined.diff>0?'+':'')+combined.diff : '';
+      return `<tr><td class="name">${esc(p.name)}</td><td><b>${label}</b></td></tr>`;
+    }).join('');
+
     return `<div style="overflow-x:auto;margin-top:8px;">
-      <table class="sc">
-        <tr><th class="name">Hole</th>${holesOut.map((h:any)=>`<th>${h.n}</th>`).join('')}<th>OUT</th>${holesIn.map((h:any)=>`<th>${h.n}</th>`).join('')}<th>IN</th><th>TOT</th></tr>
-        <tr><td class="name">Par</td>${holesOut.map((h:any)=>`<td>${h.par}</td>`).join('')}<td>${holesOut.reduce((a:number,h:any)=>a+h.par,0)}</td>${holesIn.map((h:any)=>`<td>${h.par}</td>`).join('')}<td>${holesIn.reduce((a:number,h:any)=>a+h.par,0)}</td><td>${round.par}</td></tr>
-        ${players.map(row).join('')}
-      </table>
+      ${SAT_ROUND_IDS.map(rid=>roundTable(roundOf(rid))).join('')}
+      <div style="font-size:11px;font-weight:700;color:var(--navy);margin:10px 0 2px;">36-hole net to par</div>
+      <table class="sc"><tr><th class="name">Player</th><th>Net to par</th></tr>${totalsRows}</table>
       <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">Net = gross score minus tournament net strokes (handicap − field-low handicap ${esc(String(low))}, allocated by stroke index).</div>
     </div>`;
   }
@@ -1302,16 +1450,39 @@ function initApp() {
     return `
       <div class="no-print" style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;">
         <span class="chip ${view==='scoring'?'':'off'}" data-action="admin-nav" data-view="scoring">Scores</span>
+        <span class="chip ${view==='mullies'?'':'off'}" data-action="admin-nav" data-view="mullies">Mullies</span>
         <span class="chip ${view==='expenses'?'':'off'}" data-action="admin-nav" data-view="expenses">Expenses</span>
         <span class="chip ${view==='print'?'':'off'}" data-action="admin-nav" data-view="print">Print scorecards</span>
         <span class="chip ${view==='roster'?'':'off'}" data-action="admin-nav" data-view="roster">Roster &amp; groups</span>
         <span class="chip ${view==='danger'?'':'off'}" data-action="admin-nav" data-view="danger">Danger zone</span>
       </div>
       ${view==='scoring'?renderAdminScoring()
+        : view==='mullies'?renderAdminMullies()
         : view==='expenses'?renderAdminExpenses()
         : view==='print'?renderAdminPrint()
         : view==='roster'?renderRosterEditor()
         : renderAdminDanger()}
+    `;
+  }
+
+  function renderAdminMullies(){
+    const roundId = state.adminMulliganRoundId || autoRoundId();
+    return `
+      <div class="card">
+        <h3>Edit Shotgun Mullies</h3>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">Directly set anyone's mulligan count for a round — for fixing mistakes. The leaderboard sums both Saturday rounds for display.</div>
+        <label class="field">Round</label>
+        <select data-action="admin-mulligan-pick-round">${ROUNDS.map(r=>`<option value="${r.id}" ${r.id===roundId?'selected':''}>${r.label}</option>`).join('')}</select>
+        ${allPlayerNames().map(name=>{
+          const p = findPlayerObj(name);
+          return `
+          <div style="display:flex;align-items:center;gap:10px;margin:10px 0;">
+            ${avatarHtml(p,28)}
+            <span style="flex:1;font-size:13px;">${esc(name)}</span>
+            <input type="number" min="0" style="width:70px;" data-action="admin-set-mulligan" data-round="${esc(roundId)}" data-player="${esc(name)}" value="${getMulligans(roundId,name)}"/>
+          </div>`;
+        }).join('')}
+      </div>
     `;
   }
 
@@ -1882,6 +2053,15 @@ function initApp() {
       if(action==='admin-pick-group'){ el.onchange=()=>{ state.adminGroupId=el.value; render(); }; }
       if(action==='admin-hole-prev'){ el.onclick=()=>{ if(state.adminHole>1) state.adminHole--; render(); }; }
       if(action==='admin-hole-next'){ el.onclick=()=>{ if(state.adminHole<18) state.adminHole++; render(); }; }
+      if(action==='admin-mulligan-pick-round'){ el.onchange=()=>{ state.adminMulliganRoundId=el.value; render(); }; }
+      if(action==='admin-set-mulligan'){ el.onchange=()=>{
+        const v = Math.max(0, parseInt(el.value,10)||0);
+        const roundId = el.dataset.round;
+        if(!state.mulligans[roundId]) state.mulligans[roundId] = {};
+        state.mulligans[roundId][el.dataset.player] = v;
+        saveMulligans();
+        render();
+      }; }
       if(action==='admin-set-score'){ el.onclick=()=>{
         const roundId = state.adminRoundId || autoRoundId();
         setScore(roundId, state.adminHole, el.dataset.player, parseInt(el.dataset.val,10));
