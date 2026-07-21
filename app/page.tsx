@@ -1944,6 +1944,42 @@ function initApp() {
   // replacement would tear down the live <video> preview mid-recording.
   // Appending our own overlay directly to document.body keeps it immune.
   let mulliganCtx: any = null;
+  // Guards the async gap between clicking Cancel and getUserMedia()
+  // resolving/MediaRecorder.stop() actually firing onstop — without this,
+  // a stream acquired (or a recording finished) after Cancel was already
+  // clicked would otherwise get attached to media elements and left
+  // playing with nothing around anymore to ever stop it.
+  let mulliganCancelled = false;
+
+  // Stops every track on a getUserMedia stream — this alone is NOT enough
+  // to make iOS drop its "Now Playing" indicator; the <video> element
+  // itself also needs to be paused and have its source cleared (see
+  // releaseVideoEl below), since it can keep playing audio even once
+  // detached from the visible layout if its source is still attached.
+  function stopMediaStream(stream: MediaStream | null | undefined){
+    if(!stream) return;
+    stream.getTracks().forEach(t=>{ try{ t.stop(); }catch(e){} });
+  }
+  function releaseVideoEl(videoEl: HTMLVideoElement | null | undefined){
+    if(!videoEl) return;
+    try{ videoEl.pause(); }catch(e){}
+    try{ videoEl.srcObject = null; }catch(e){}
+    try{ videoEl.removeAttribute('src'); videoEl.load(); }catch(e){}
+  }
+  // iOS can populate its Now Playing / Dynamic Island media indicator for a
+  // playing <video> even without the page ever touching the Media Session
+  // API directly. We don't set navigator.mediaSession anywhere explicitly,
+  // but reset it defensively on every exit path anyway, in case any is set
+  // implicitly by the platform.
+  function resetMediaSession(){
+    try{
+      const ms: any = (navigator as any).mediaSession;
+      if(ms){
+        ms.metadata = null;
+        if('playbackState' in ms) ms.playbackState = 'none';
+      }
+    }catch(e){}
+  }
 
   function openMulliganCaptureFlow(player:string, roundId:string){
     let overlay = document.getElementById('mulligan-overlay');
@@ -1956,21 +1992,30 @@ function initApp() {
     beginMulliganRecording(overlay, player, roundId);
   }
 
+  // The one true exit path — Cancel, the getUserMedia-failed Close button,
+  // or called defensively before starting over. Fully tears down whatever
+  // stream/recorder/video is currently active, however far the flow got.
   function teardownMulliganCapture(){
+    mulliganCancelled = true;
     if(mulliganCtx){
       if(mulliganCtx.iv) clearInterval(mulliganCtx.iv);
       if(mulliganCtx.recorder && mulliganCtx.recorder.state!=='inactive'){
         try{ mulliganCtx.recorder.stop(); }catch(e){}
       }
-      if(mulliganCtx.stream){ mulliganCtx.stream.getTracks().forEach((t:any)=>t.stop()); }
+      stopMediaStream(mulliganCtx.stream);
       if(mulliganCtx.videoUrl){ URL.revokeObjectURL(mulliganCtx.videoUrl); }
     }
-    mulliganCtx = null;
     const overlay = document.getElementById('mulligan-overlay');
-    if(overlay) overlay.remove();
+    if(overlay){
+      releaseVideoEl(overlay.querySelector('video'));
+      overlay.remove();
+    }
+    resetMediaSession();
+    mulliganCtx = null;
   }
 
   function beginMulliganRecording(overlay:HTMLElement, player:string, roundId:string){
+    mulliganCancelled = false;
     overlay.innerHTML = `
       <div style="flex:1;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;">
         <video id="mull-video" autoplay muted playsinline style="width:100%;height:100%;object-fit:cover;"></video>
@@ -1992,6 +2037,10 @@ function initApp() {
       video: { facingMode:'environment', width:{ideal:640}, height:{ideal:854}, frameRate:{ideal:24} },
       audio: true,
     }).then((stream)=>{
+      // Cancel was clicked while getUserMedia was still resolving — this
+      // stream was never attached to anything, so stop it immediately
+      // instead of leaving it running with no UI left to release it.
+      if(mulliganCancelled){ stopMediaStream(stream); return; }
       videoEl.srcObject = stream;
       const chunks: Blob[] = [];
       const preferredType = ['video/webm;codecs=vp8,opus','video/webm','video/mp4']
@@ -2005,7 +2054,15 @@ function initApp() {
         : new MediaRecorder(stream, { videoBitsPerSecond: 1_000_000 });
       recorder.ondataavailable = (e)=>{ if(e.data.size>0) chunks.push(e.data); };
       recorder.onstop = ()=>{
-        stream.getTracks().forEach(t=>t.stop());
+        stopMediaStream(stream);
+        releaseVideoEl(videoEl);
+        // Cancel was clicked mid-recording: recorder.stop() fires this
+        // handler asynchronously, after the overlay may already be gone.
+        // Without this check we'd still build a fresh autoplay review
+        // <video> in a detached-but-alive overlay — a real orphaned
+        // audio/video element with nothing left to ever stop it, which is
+        // exactly the stuck Now-Playing-indicator bug this fixes.
+        if(mulliganCancelled) return;
         const blob = new Blob(chunks, { type: recorder.mimeType || 'video/webm' });
         showMulliganReview(overlay, player, roundId, blob);
       };
@@ -2022,6 +2079,7 @@ function initApp() {
       }, 1000);
       mulliganCtx = { stream, recorder, iv };
     }).catch((err:any)=>{
+      if(mulliganCancelled) return;
       overlay.innerHTML = `
         <div style="flex:1;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;color:#fff;font-size:14px;">
           Camera/mic access is needed to record a mulligan.${err && err.message ? ' ('+esc(err.message)+')' : ''}
@@ -2037,7 +2095,7 @@ function initApp() {
     mulliganCtx = { videoUrl: url };
     overlay.innerHTML = `
       <div style="flex:1;position:relative;display:flex;align-items:center;justify-content:center;overflow:hidden;">
-        <video src="${url}" controls autoplay loop playsinline style="width:100%;height:100%;object-fit:contain;background:#000;"></video>
+        <video id="mull-review-video" src="${url}" controls autoplay loop playsinline style="width:100%;height:100%;object-fit:contain;background:#000;"></video>
       </div>
       <div style="display:flex;gap:10px;padding:14px;background:#000;">
         <button id="mull-retake" class="toolbarbtn" style="flex:1;background:transparent;color:#fff;border-color:rgba(255,255,255,0.4);">Retake</button>
@@ -2045,6 +2103,7 @@ function initApp() {
       </div>
     `;
     document.getElementById('mull-retake')!.onclick = ()=>{
+      releaseVideoEl(document.getElementById('mull-review-video') as HTMLVideoElement);
       URL.revokeObjectURL(url);
       beginMulliganRecording(overlay, player, roundId);
     };
@@ -2068,8 +2127,10 @@ function initApp() {
         }
         URL.revokeObjectURL(url);
         mulliganCtx = null;
+        releaseVideoEl(document.getElementById('mull-review-video') as HTMLVideoElement);
         const el = document.getElementById('mulligan-overlay');
         if(el) el.remove();
+        resetMediaSession();
         render();
       }catch(e){
         postBtn.disabled = false; postBtn.textContent = 'Post mulligan';
