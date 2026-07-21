@@ -4,8 +4,11 @@
 // glance at during the round.
 
 // Personal joke banks, keyed by each player's short display name (must match
-// Player.name in lib/tripData.ts). Erik, Alex, and Ken intentionally have no
-// entries yet — more lines (for them and others) will be added later.
+// Player.name in lib/tripData.ts). Ken intentionally has no entries yet —
+// more lines (for him and others) may be added later.
+//
+// Erik's lines lean on appearance jokes on purpose — that's specific to Erik
+// only. Don't reuse that style of joke for any other player.
 export const PLAYER_LINES: Record<string, string[]> = {
   Jeff: [
     "Somewhere, Jeff just said \"ah nuts.\" Statistically likely.",
@@ -44,6 +47,20 @@ export const PLAYER_LINES: Record<string, string[]> = {
   Ryan: [
     "Ryan should be running a spreadsheet instead of a scorecard.",
     "Ryan's from Alabama — we'll allow one Roll Tide-fueled shank per round.",
+  ],
+  Alex: [
+    "Today's not a golf day for you, Alex — maybe more of a vibes guy today, pal.",
+    "Alex, your kids miss you. Also your swing right now.",
+    "3 kids at home and Alex chose this. Bold.",
+    "Some days Alex shows up. Today Alex showed up to vibe.",
+  ],
+  Erik: [
+    "Erik's about to explain his \"strategy\" after a triple bogey.",
+    "Confidence: 10/10. Handicap: also basically 10/10 too high for that confidence.",
+    "Somewhere, Erik is convinced this is the round he \"figures it out.\"",
+    "Erik plays like he's got a scratch handicap and a YouTube swing tutorial. Neither is working today.",
+    "Erik's swing isn't the only rough thing about him.",
+    "That's a bogey and, frankly, a face only a mother could love.",
   ],
 };
 

@@ -47,6 +47,7 @@ function initApp() {
     authError:'', authInfo:'', authBusy:false,
     onboardingBusy:false, onboardingError:'',
     profileUploadOpen:false, profileUploadBusy:false, profileUploadError:'',
+    rosterPhotoUploadingFor: null, rosterPhotoError:'', rosterPhotoErrorFor: null,
     config: DEFAULT_CONFIG,
     scores: {},
     mulligans: {},
@@ -197,26 +198,48 @@ function initApp() {
   }
 
   // ---- avatar upload ----
-  async function handleAvatarFile(file: File, onDone?: ()=>void){
-    if(!state.session) return;
-    state.onboardingBusy = true; state.onboardingError=''; state.profileUploadError=''; state.profileUploadBusy=true; render();
+  // Shared core: compress, upload to the avatars/ folder, and stamp the
+  // resulting URL onto a specific roster player. Used both by a player
+  // uploading their own selfie and by an admin replacing someone else's
+  // photo from the roster editor.
+  async function uploadAvatarForPlayer(file: File, targetName:string): Promise<{ok:boolean, error?:string}>{
     try{
       const compressed = await compressImage(file);
       const url = await uploadPhoto(compressed, 'avatars');
-      if(!url){
-        state.onboardingError = 'Upload failed — check your connection and try again.';
-        state.profileUploadError = state.onboardingError;
-      } else {
-        const p = findPlayerObj(state.session.name);
-        if(p){ p.avatarUrl = url; saveConfig(); }
-        state.profileUploadOpen = false;
-        if(onDone) onDone();
-      }
+      if(!url) return {ok:false, error:'Upload failed — check your connection and try again.'};
+      const p = findPlayerObj(targetName);
+      if(p){ p.avatarUrl = url; saveConfig(); }
+      return {ok:true};
     } catch(e){
-      state.onboardingError = 'Something went wrong — try again.';
-      state.profileUploadError = state.onboardingError;
+      return {ok:false, error:'Something went wrong — try again.'};
+    }
+  }
+  async function handleAvatarFile(file: File, onDone?: ()=>void){
+    if(!state.session) return;
+    state.onboardingBusy = true; state.onboardingError=''; state.profileUploadError=''; state.profileUploadBusy=true; render();
+    const result = await uploadAvatarForPlayer(file, state.session.name);
+    if(!result.ok){
+      state.onboardingError = result.error!;
+      state.profileUploadError = result.error!;
+    } else {
+      state.profileUploadOpen = false;
+      if(onDone) onDone();
     }
     state.onboardingBusy = false; state.profileUploadBusy = false;
+    render();
+  }
+  // Admin-only: replace ANY roster player's photo from the roster editor —
+  // for anyone who skipped the forced selfie step, or wants a new photo.
+  async function handleRosterAvatarFile(file: File, targetName:string){
+    state.rosterPhotoUploadingFor = targetName;
+    state.rosterPhotoError = ''; state.rosterPhotoErrorFor = null;
+    render();
+    const result = await uploadAvatarForPlayer(file, targetName);
+    state.rosterPhotoUploadingFor = null;
+    if(!result.ok){
+      state.rosterPhotoError = result.error!;
+      state.rosterPhotoErrorFor = targetName;
+    }
     render();
   }
 
@@ -733,17 +756,32 @@ function initApp() {
     return `
       <div class="card">
         <h3>Roster</h3>
-        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Display name, real name, email, and handicap (used for net scoring and 2v2 strokes).</div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Display name, real name, email, handicap, and photo.</div>
         <div style="display:grid;grid-template-columns:1fr 1fr 1.4fr 55px 30px;gap:6px;font-size:11px;color:var(--text-muted);margin-bottom:4px;">
           <span>Display</span><span>Full name</span><span>Email</span><span>Hcp</span><span></span>
         </div>
         ${roster.map((p,pi)=>`
-          <div style="display:grid;grid-template-columns:1fr 1fr 1.4fr 55px 30px;gap:6px;margin-bottom:6px;align-items:center;">
-            <input type="text" data-action="rename-player" data-pi="${pi}" value="${esc(p.name)}"/>
-            <input type="text" data-action="set-fullname" data-pi="${pi}" value="${esc(p.fullName)}"/>
-            <input type="text" data-action="set-email" data-pi="${pi}" value="${esc(p.email)}"/>
-            <input type="number" data-action="set-handicap" data-pi="${pi}" value="${p.handicap||0}"/>
-            <button class="btn small" data-action="remove-player" data-pi="${pi}">✕</button>
+          <div style="margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border);">
+            <div style="display:grid;grid-template-columns:1fr 1fr 1.4fr 55px 30px;gap:6px;margin-bottom:8px;align-items:center;">
+              <input type="text" data-action="rename-player" data-pi="${pi}" value="${esc(p.name)}"/>
+              <input type="text" data-action="set-fullname" data-pi="${pi}" value="${esc(p.fullName)}"/>
+              <input type="text" data-action="set-email" data-pi="${pi}" value="${esc(p.email)}"/>
+              <input type="number" data-action="set-handicap" data-pi="${pi}" value="${p.handicap||0}"/>
+              <button class="btn small" data-action="remove-player" data-pi="${pi}">✕</button>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+              ${avatarHtml(p, 36)}
+              <label class="btn small" style="cursor:pointer;">
+                📷 Take photo
+                <input type="file" accept="image/*" capture="user" data-action="roster-photo-file" data-player="${esc(p.name)}" style="display:none;"/>
+              </label>
+              <label class="btn small" style="cursor:pointer;">
+                🖼️ Library
+                <input type="file" accept="image/*" data-action="roster-photo-file" data-player="${esc(p.name)}" style="display:none;"/>
+              </label>
+              ${state.rosterPhotoUploadingFor===p.name? `<span style="font-size:11px;color:var(--text-secondary);">Uploading…</span>` : ''}
+            </div>
+            ${state.rosterPhotoErrorFor===p.name && state.rosterPhotoError? `<div style="font-size:11px;color:var(--danger-text);margin-top:4px;">${esc(state.rosterPhotoError)}</div>` : ''}
           </div>
         `).join('')}
         <button class="btn small" data-action="add-player">+ Add player</button>
@@ -1849,6 +1887,9 @@ function initApp() {
       }; }
       if(action==='profile-photo-file'){ el.onchange=()=>{
         if(el.files && el.files[0]) handleAvatarFile(el.files[0]);
+      }; }
+      if(action==='roster-photo-file'){ el.onchange=()=>{
+        if(el.files && el.files[0]) handleRosterAvatarFile(el.files[0], el.dataset.player);
       }; }
       if(action==='rename-player'){ el.onchange=()=>{
         const pi=el.dataset.pi;
