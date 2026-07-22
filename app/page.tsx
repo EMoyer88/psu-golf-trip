@@ -843,6 +843,11 @@ function initApp() {
     return icons[name]||'';
   }
 
+  // Tracks which round/group/hole the score strips were last auto-centered
+  // for, so centerScoreStrips() only fires on a genuine hole change — never
+  // as a side effect of a same-hole re-render (e.g. selecting a score).
+  let lastCenteredScoreHoleKey: string | null = null;
+
   function render(){
     const app = document.getElementById('app');
     if(!app) return;
@@ -866,12 +871,35 @@ function initApp() {
 
     const fullscreenScore = state.tab==='score';
     if(fullscreenScore){
+      // innerHTML replacement below rebuilds every .scorestrip from scratch,
+      // which would otherwise reset scrollLeft to 0 — capture each strip's
+      // current position first so a same-hole re-render (tapping a score,
+      // or an unrelated realtime update landing while this screen is open)
+      // can restore it instead of losing it or recentering.
+      const scoreStripScroll: Record<string, number> = {};
+      document.querySelectorAll('.scorestrip').forEach((strip:any)=>{
+        if(strip.dataset.player) scoreStripScroll[strip.dataset.player] = strip.scrollLeft;
+      });
       app.className = 'fullscreen-score';
       app.innerHTML = renderScoreEntryFullScreen({
         roundId: state.activeRoundId, groupId: state.activeGroupId, hole: state.activeHole
       }) + tabbarHtml();
       bindEvents();
-      centerScoreStrips();
+      // Only auto-center on a genuine hole/round/group change (the initial
+      // load of that hole) — never as a side effect of selecting a score.
+      const holeKey = `${state.activeRoundId}-${state.activeGroupId}-${state.activeHole}`;
+      if(holeKey !== lastCenteredScoreHoleKey){
+        lastCenteredScoreHoleKey = holeKey;
+        centerScoreStrips();
+      } else {
+        document.querySelectorAll('.scorestrip').forEach((strip:any)=>{
+          const prev = scoreStripScroll[strip.dataset.player];
+          if(prev!=null){
+            void strip.getBoundingClientRect(); // force layout so a just-inserted element's scrollLeft write below isn't clamped to 0
+            strip.scrollLeft = prev;
+          }
+        });
+      }
       return;
     }
     app.className = '';
@@ -1223,7 +1251,7 @@ function initApp() {
                 ${teamLabel ? `<span class="meta">${teamLabel}</span>` : ''}
                 <div class="strokedots">${strokeDots}</div>
               </div>
-              <div class="scorestrip">
+              <div class="scorestrip" data-player="${esc(name)}">
                 ${opts_.map(n=>`<button class="scorebtn-sm ${n===val?'selected':''}" ${editable?`data-action="set-score" data-player="${esc(name)}" data-val="${n}"`:'disabled'}>${n}</button>`).join('')}
               </div>
               <div class="tagdot" style="background:${dotColor};"></div>
