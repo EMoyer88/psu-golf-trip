@@ -855,6 +855,7 @@ function initApp() {
 
     if(state.myEmail && !state.session){
       app.className='';
+      document.documentElement.classList.remove('scroll-locked');
       app.innerHTML = renderNotOnRoster();
       bindEvents();
       return;
@@ -863,6 +864,7 @@ function initApp() {
       const p = findPlayerObj(state.session.name);
       if(p && !p.avatarUrl){
         app.className='';
+        document.documentElement.classList.remove('scroll-locked');
         app.innerHTML = renderOnboarding(p);
         bindEvents();
         return;
@@ -881,6 +883,10 @@ function initApp() {
         if(strip.dataset.player) scoreStripScroll[strip.dataset.player] = strip.scrollLeft;
       });
       app.className = 'fullscreen-score';
+      // Hard lock, not just an assumption that #app's own fixed-height +
+      // overflow:hidden always perfectly contains its content — see
+      // "html.scroll-locked" in globals.css.
+      document.documentElement.classList.add('scroll-locked');
       app.innerHTML = renderScoreEntryFullScreen({
         roundId: state.activeRoundId, groupId: state.activeGroupId, hole: state.activeHole
       }) + tabbarHtml();
@@ -903,6 +909,7 @@ function initApp() {
       return;
     }
     app.className = '';
+    document.documentElement.classList.remove('scroll-locked');
 
     let body = '';
     if(state.tab==='home') body = renderHome();
