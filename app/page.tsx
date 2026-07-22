@@ -2,7 +2,6 @@
 
 import { useEffect, useRef } from 'react';
 import { kvGet, kvSet, kvSubscribe, uploadPhoto, compressImage } from '@/lib/store';
-import { supabase } from '@/lib/supabaseClient';
 import {
   ROUNDS_META, DEFAULT_CONFIG, ADMIN_EMAILS,
   strokesForHole, lowHandicapAmong, initialsFor,
@@ -39,16 +38,16 @@ function initApp() {
 
   let state: any = {
     tab:'home',
-    authUser: null,
-    authChecked: false,
+    myEmail: null, // roster email the person identified as, persisted in localStorage — no Supabase Auth involved
     session: null,
-    authView:'signin',
-    authEmail:'', authPassword:'', authConfirmPassword:'',
-    authError:'', authInfo:'', authBusy:false,
+    authEmail:'',
+    authError:'',
     onboardingBusy:false, onboardingError:'',
     profileUploadOpen:false, profileUploadBusy:false, profileUploadError:'',
     rosterPhotoUploadingFor: null, rosterPhotoError:'', rosterPhotoErrorFor: null,
     config: DEFAULT_CONFIG,
+    configDraft: null, // unsaved working copy of config while adminView==='roster' — see saveConfig()/isRosterDraftDirty()
+    rosterSavedMsg: '',
     scores: {},
     mulligans: {},
     beaver: {},
@@ -93,16 +92,8 @@ function initApp() {
     const ch = await kvGet('chat'); if(ch) state.chat = ch;
     const apf = await kvGet('auto-post-flags'); if(apf) state.autoPostFlags = apf;
 
-    const { data } = await supabase.auth.getSession();
-    state.authUser = data.session ? { id: data.session.user.id, email: data.session.user.email } : null;
-    state.authChecked = true;
+    try{ state.myEmail = localStorage.getItem('golf-my-email') || null; }catch(e){ state.myEmail = null; }
     recomputeSession();
-
-    supabase.auth.onAuthStateChange((_event: string, session: any) => {
-      state.authUser = session ? { id: session.user.id, email: session.user.email } : null;
-      recomputeSession();
-      render();
-    });
 
     state.loaded = true;
     state.activeGroupId = defaultGroupIdForRound(state.activeRoundId);
@@ -122,6 +113,17 @@ function initApp() {
   }
 
   function saveConfig(){ kvSet('trip-config', state.config); }
+  // ---- roster/tee-time admin draft (explicit Save, not live-on-every-change) ----
+  function isRosterDraftDirty(){
+    return !!state.configDraft && JSON.stringify(state.configDraft) !== JSON.stringify(state.config);
+  }
+  function confirmLeaveRoster(){
+    if(state.adminView==='roster' && isRosterDraftDirty()){
+      if(!confirm('You have unsaved roster/tee-time changes. Leave without saving?')) return false;
+      state.configDraft = null;
+    }
+    return true;
+  }
   function saveScores(){ kvSet('scores', state.scores); }
   function saveMulligans(){ kvSet('mulligans', state.mulligans); }
   function saveBeaver(){ kvSet('beaver', state.beaver); }
@@ -157,49 +159,36 @@ function initApp() {
     return !!state.session && sessionGroupIdForRound(roundId)===groupId;
   }
   function isAdmin(){
-    return !!state.authUser && ADMIN_EMAILS.includes(String(state.authUser.email||'').trim().toLowerCase());
+    return !!state.myEmail && ADMIN_EMAILS.includes(String(state.myEmail||'').trim().toLowerCase());
   }
 
-  // ---- auth ----
+  // ---- identification (email-only, no Supabase Auth — matched against the roster's email field) ----
   function recomputeSession(){
-    if(!state.authUser){ state.session = null; return; }
-    const email = String(state.authUser.email||'').trim().toLowerCase();
+    if(!state.myEmail){ state.session = null; return; }
+    const email = String(state.myEmail||'').trim().toLowerCase();
     const p = state.config.roster.find((r:Player)=>r.email.trim().toLowerCase()===email);
     state.session = p ? { name: p.name } : null;
   }
-  async function doSignUp(){
-    if(!state.authEmail || !state.authPassword){ state.authError='Enter an email and password.'; render(); return; }
-    state.authError=''; state.authInfo=''; state.authBusy=true; render();
-    const { data, error } = await supabase.auth.signUp({ email: state.authEmail.trim(), password: state.authPassword });
-    state.authBusy=false;
-    if(error){ state.authError=error.message; render(); return; }
-    if(data.session){
-      state.authUser = { id:data.session.user.id, email:data.session.user.email };
-      recomputeSession();
+  function doIdentify(){
+    const email = state.authEmail.trim();
+    if(!email){ state.authError='Enter your email.'; render(); return; }
+    const norm = email.toLowerCase();
+    const match = state.config.roster.find((r:Player)=>r.email.trim().toLowerCase()===norm);
+    if(!match){
+      state.authError = "That email isn't on the roster — check with Erik or Greg to get it added.";
       render();
-    } else {
-      // Email confirmation is off, so signUp() should always return an active
-      // session above — this branch only covers an unexpected edge case.
-      state.authInfo = 'Account created — sign in below to continue.';
-      state.authView = 'signin';
-      state.authPassword='';
-      render();
+      return;
     }
-  }
-  async function doSignIn(){
-    if(!state.authEmail || !state.authPassword){ state.authError='Enter an email and password.'; render(); return; }
-    state.authError=''; state.authInfo=''; state.authBusy=true; render();
-    const { data, error } = await supabase.auth.signInWithPassword({ email: state.authEmail.trim(), password: state.authPassword });
-    state.authBusy=false;
-    if(error){ state.authError=error.message; render(); return; }
-    state.authUser = { id:data.user.id, email:data.user.email };
+    state.authError='';
+    state.myEmail = email;
+    try{ localStorage.setItem('golf-my-email', email); }catch(e){}
     recomputeSession();
     state.tab='home';
     render();
   }
-  async function doSignOut(){
-    await supabase.auth.signOut();
-    state.authUser=null; state.session=null; state.tab='home';
+  function doSignOut(){
+    state.myEmail=null; state.session=null; state.tab='home';
+    try{ localStorage.removeItem('golf-my-email'); }catch(e){}
     render();
   }
 
@@ -214,7 +203,16 @@ function initApp() {
       const url = await uploadPhoto(compressed, 'avatars');
       if(!url) return {ok:false, error:'Upload failed — check your connection and try again.'};
       const p = findPlayerObj(targetName);
-      if(p){ p.avatarUrl = url; saveConfig(); }
+      if(p){
+        p.avatarUrl = url;
+        saveConfig();
+        // Keep an in-progress roster-editor draft in sync so it doesn't
+        // overwrite this photo with a stale copy when later saved.
+        if(state.configDraft){
+          const dp = state.configDraft.roster.find((r:Player)=>r.name===targetName);
+          if(dp) dp.avatarUrl = url;
+        }
+      }
       return {ok:true};
     } catch(e){
       return {ok:false, error:'Something went wrong — try again.'};
@@ -754,15 +752,15 @@ function initApp() {
   function render(){
     const app = document.getElementById('app');
     if(!app) return;
-    if(!state.loaded || !state.authChecked){ app.innerHTML = '<div class="wrap"><div class="empty" style="color:#fff;">Loading trip data…</div></div>'; return; }
+    if(!state.loaded){ app.innerHTML = '<div class="wrap"><div class="empty" style="color:#fff;">Loading trip data…</div></div>'; return; }
 
-    if(state.authUser && !state.session){
+    if(state.myEmail && !state.session){
       app.className='';
       app.innerHTML = renderNotOnRoster();
       bindEvents();
       return;
     }
-    if(state.authUser && state.session){
+    if(state.myEmail && state.session){
       const p = findPlayerObj(state.session.name);
       if(p && !p.avatarUrl){
         app.className='';
@@ -799,7 +797,7 @@ function initApp() {
         <div class="header no-print">
           <img src="/logo.png" alt="Trip logo"/>
           <div class="title">9th Annual PSU Golf Trip</div>
-          <div class="subtitle">${state.session ? esc(state.session.name)+(isAdmin()?' · Admin':'') : (state.authUser ? 'Not on roster' : 'Not signed in')}</div>
+          <div class="subtitle">${state.session ? esc(state.session.name)+(isAdmin()?' · Admin':'') : (state.myEmail ? 'Not on roster' : 'Not signed in')}</div>
         </div>
         ${body}
       </div>
@@ -830,11 +828,11 @@ function initApp() {
           <div class="title">9th Annual PSU Golf Trip</div>
         </div>
         <div class="card" style="text-align:center;">
-          <h3>You're signed in, but not on the roster yet</h3>
+          <h3>That email isn't on the roster</h3>
           <div style="font-size:13px;color:var(--text-secondary);margin:8px 0 16px;">
-            Signed in as ${esc(state.authUser.email)}. Ask the trip organizer to add your email to the roster, then reload this page.
+            You identified as ${esc(state.myEmail)}. Ask the trip organizer to add your email to the roster, then try again.
           </div>
-          <button class="btn block" data-action="sign-out">Sign out</button>
+          <button class="btn block" data-action="sign-out">Try a different email</button>
         </div>
       </div>
     `;
@@ -871,22 +869,14 @@ function initApp() {
   }
 
   function renderAuth(){
-    const signup = state.authView==='signup';
     return `
       <div class="card">
-        <h3>${signup? 'Create your account' : 'Sign in'}</h3>
+        <h3>Sign in</h3>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Enter the email on your roster row — no password needed — to unlock editing for your own group.</div>
         <label class="field">Email</label>
         <input type="email" id="auth-email" value="${esc(state.authEmail)}" placeholder="you@example.com"/>
-        <label class="field">Password</label>
-        <input type="password" id="auth-password" value="${esc(state.authPassword)}" placeholder="••••••••"/>
         ${state.authError? `<div style="font-size:12px;color:var(--danger-text);margin-top:10px;">${esc(state.authError)}</div>` : ''}
-        ${state.authInfo? `<div style="font-size:12px;color:var(--success-text);margin-top:10px;">${esc(state.authInfo)}</div>` : ''}
-        <button class="btn primary block" style="margin-top:14px;" data-action="${signup?'submit-signup':'submit-signin'}" ${state.authBusy?'disabled':''}>
-          ${state.authBusy? 'Please wait…' : (signup? 'Sign up' : 'Sign in')}
-        </button>
-        <button class="link-btn" style="margin-top:12px;" data-action="toggle-auth-view">
-          ${signup? 'Already have an account? Sign in' : "New here? Create an account"}
-        </button>
+        <button class="btn primary block" style="margin-top:14px;" data-action="submit-signin">Sign in</button>
       </div>
     `;
   }
@@ -944,19 +934,34 @@ function initApp() {
     }).join('');
 
     return `
-      ${state.authUser ? '' : `
+      ${state.myEmail ? '' : `
       <div class="card" style="border-color:var(--navy);">
         <h3>Sign in</h3>
         <div style="font-size:13px;color:var(--text-secondary);margin-bottom:10px;">Sign in with your email so you can enter scores for your own group.</div>
-        <button class="btn primary block" data-action="go-auth">Sign in / sign up</button>
+        <button class="btn primary block" data-action="go-auth">Sign in</button>
       </div>`}
       ${roundsHtml}
     `;
   }
 
   function renderRosterEditor(){
-    const roster: Player[] = state.config.roster;
+    if(!state.configDraft) state.configDraft = JSON.parse(JSON.stringify(state.config));
+    const dirty = isRosterDraftDirty();
+    const roster: Player[] = state.configDraft.roster;
     return `
+      <div class="card" style="border-color:${dirty?'var(--gold)':'var(--border)'};">
+        <div class="row" style="align-items:center;">
+          <h3 style="margin:0;">${dirty? 'Unsaved roster/tee-time changes' : 'Roster & tee times'}</h3>
+        </div>
+        <div style="font-size:12px;color:var(--text-secondary);margin:6px 0 10px;">
+          ${dirty? 'Edits below are local only until you save.' : 'No unsaved changes.'}
+          ${state.rosterSavedMsg? ` <span style="color:var(--success-text);font-weight:600;">${esc(state.rosterSavedMsg)}</span>` : ''}
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="btn primary" data-action="admin-roster-save" ${dirty?'':'disabled'}>Save changes</button>
+          <button class="btn" data-action="admin-roster-discard" ${dirty?'':'disabled'}>Discard changes</button>
+        </div>
+      </div>
       <div class="card">
         <h3>Roster</h3>
         <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Display name, real name, email, handicap, and photo.</div>
@@ -994,9 +999,9 @@ function initApp() {
   }
 
   function renderRoundGroupsEditor(roundId:string, label:string){
-    const groups: RoundGroup[] = groupsForRound(roundId);
+    const groups: RoundGroup[] = state.configDraft.rounds[roundId] || [];
     const isTeamRound = roundId==='satam' || roundId==='satpm';
-    const roster: Player[] = state.config.roster;
+    const roster: Player[] = state.configDraft.roster;
     return `
       <div class="card">
         <h3>${esc(label)} groups</h3>
@@ -1775,12 +1780,12 @@ function initApp() {
     return `
       <div class="card">
         <h3>Your account</h3>
-        ${state.authUser? `
+        ${state.myEmail? `
           <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
             ${avatarHtml(p, 48)}
             <div>
-              <div style="font-size:14px;font-weight:600;">${p? esc(p.name) : esc(state.authUser.email)}</div>
-              <div style="font-size:12px;color:var(--text-secondary);">${esc(state.authUser.email)}</div>
+              <div style="font-size:14px;font-weight:600;">${p? esc(p.name) : esc(state.myEmail)}</div>
+              <div style="font-size:12px;color:var(--text-secondary);">${esc(state.myEmail)}</div>
             </div>
           </div>
           ${p ? `
@@ -1794,7 +1799,7 @@ function initApp() {
           <button class="btn block" data-action="sign-out">Sign out</button>
         ` : `
           <div style="font-size:13px;color:var(--text-secondary);margin-bottom:10px;">You're not signed in — you can view everything, but you'll need to sign in to enter scores for your group.</div>
-          <button class="btn primary block" data-action="go-auth">Sign in / sign up</button>
+          <button class="btn primary block" data-action="go-auth">Sign in</button>
         `}
       </div>
       <div class="card">
@@ -2248,7 +2253,9 @@ function initApp() {
   function bindEvents(){
     document.querySelectorAll('[data-tab]').forEach((el:any)=>{
       el.onclick = ()=>{
-        state.tab = el.dataset.tab;
+        const nextTab = el.dataset.tab;
+        if(nextTab!==state.tab && !confirmLeaveRoster()) return;
+        state.tab = nextTab;
         if(state.tab==='score' && !groupInRound(state.activeRoundId, state.activeGroupId)){
           state.activeGroupId = defaultGroupIdForRound(state.activeRoundId);
         }
@@ -2258,16 +2265,9 @@ function initApp() {
     document.querySelectorAll('[data-action]').forEach((el:any)=>{
       const action = el.dataset.action;
       if(action==='go-auth'){ el.onclick=()=>{ state.tab='auth'; render(); }; }
-      if(action==='toggle-auth-view'){ el.onclick=()=>{ state.authView = state.authView==='signup'?'signin':'signup'; state.authError=''; state.authInfo=''; render(); }; }
       if(action==='submit-signin'){ el.onclick=()=>{
         state.authEmail = (document.getElementById('auth-email') as HTMLInputElement).value.trim();
-        state.authPassword = (document.getElementById('auth-password') as HTMLInputElement).value;
-        doSignIn();
-      }; }
-      if(action==='submit-signup'){ el.onclick=()=>{
-        state.authEmail = (document.getElementById('auth-email') as HTMLInputElement).value.trim();
-        state.authPassword = (document.getElementById('auth-password') as HTMLInputElement).value;
-        doSignUp();
+        doIdentify();
       }; }
       if(action==='sign-out'){ el.onclick=()=>{ doSignOut(); }; }
       if(action==='onboarding-file'){ el.onchange=()=>{
@@ -2281,47 +2281,49 @@ function initApp() {
       }; }
       if(action==='rename-player'){ el.onchange=()=>{
         const pi=el.dataset.pi;
-        const oldName = state.config.roster[pi].name;
+        const draft = state.configDraft;
+        const oldName = draft.roster[pi].name;
         const newName = el.value.trim() || oldName;
-        state.config.roster[pi].name = newName;
+        draft.roster[pi].name = newName;
         if(oldName!==newName){
-          Object.values(state.config.rounds).forEach((gs:any)=>gs.forEach((g:any)=>{
+          Object.values(draft.rounds).forEach((gs:any)=>gs.forEach((g:any)=>{
             g.players = g.players.map((n:string)=>n===oldName?newName:n);
             if(g.teams && g.teams[oldName]!=null){ g.teams[newName]=g.teams[oldName]; delete g.teams[oldName]; }
           }));
         }
-        saveConfig(); render();
+        render();
       }; }
-      if(action==='set-fullname'){ el.onchange=()=>{ state.config.roster[el.dataset.pi].fullName = el.value; saveConfig(); }; }
-      if(action==='set-email'){ el.onchange=()=>{ state.config.roster[el.dataset.pi].email = el.value; saveConfig(); }; }
-      if(action==='set-handicap'){ el.onchange=()=>{ state.config.roster[el.dataset.pi].handicap = parseInt(el.value,10)||0; saveConfig(); }; }
+      if(action==='set-fullname'){ el.onchange=()=>{ state.configDraft.roster[el.dataset.pi].fullName = el.value; render(); }; }
+      if(action==='set-email'){ el.onchange=()=>{ state.configDraft.roster[el.dataset.pi].email = el.value; render(); }; }
+      if(action==='set-handicap'){ el.onchange=()=>{ state.configDraft.roster[el.dataset.pi].handicap = parseInt(el.value,10)||0; render(); }; }
       if(action==='remove-player'){ el.onclick=()=>{
-        const name = state.config.roster[el.dataset.pi].name;
-        state.config.roster.splice(el.dataset.pi,1);
-        Object.values(state.config.rounds).forEach((gs:any)=>gs.forEach((g:any)=>{
+        const draft = state.configDraft;
+        const name = draft.roster[el.dataset.pi].name;
+        draft.roster.splice(el.dataset.pi,1);
+        Object.values(draft.rounds).forEach((gs:any)=>gs.forEach((g:any)=>{
           g.players = g.players.filter((n:string)=>n!==name);
           if(g.teams) delete g.teams[name];
         }));
-        saveConfig(); render();
+        render();
       }; }
       if(action==='add-player'){ el.onclick=()=>{
-        state.config.roster.push({name:'New player', fullName:'New player', email:'', handicap:0, avatarUrl:null});
-        saveConfig(); render();
+        state.configDraft.roster.push({name:'New player', fullName:'New player', email:'', handicap:0, avatarUrl:null});
+        render();
       }; }
       if(action==='rename-teetime'){ el.onchange=()=>{
-        state.config.rounds[el.dataset.round][el.dataset.gi].teeTime = el.value; saveConfig();
+        state.configDraft.rounds[el.dataset.round][el.dataset.gi].teeTime = el.value; render();
       }; }
       if(action==='remove-group'){ el.onclick=()=>{
-        state.config.rounds[el.dataset.round].splice(el.dataset.gi,1); saveConfig(); render();
+        state.configDraft.rounds[el.dataset.round].splice(el.dataset.gi,1); render();
       }; }
       if(action==='add-group'){ el.onclick=()=>{
         const roundId = el.dataset.round;
-        const n = state.config.rounds[roundId].length+1;
-        state.config.rounds[roundId].push({id:roundId+'-g'+n+'-'+Date.now(), teeTime:'TBD', players:[], teams: (roundId==='satam'||roundId==='satpm')?{}:undefined});
-        saveConfig(); render();
+        const n = state.configDraft.rounds[roundId].length+1;
+        state.configDraft.rounds[roundId].push({id:roundId+'-g'+n+'-'+Date.now(), teeTime:'TBD', players:[], teams: (roundId==='satam'||roundId==='satpm')?{}:undefined});
+        render();
       }; }
       if(action==='toggle-group-player'){ el.onclick=()=>{
-        const g = state.config.rounds[el.dataset.round][el.dataset.gi];
+        const g = state.configDraft.rounds[el.dataset.round][el.dataset.gi];
         const name = el.dataset.player;
         if(g.players.includes(name)){
           g.players = g.players.filter((n:string)=>n!==name);
@@ -2330,13 +2332,27 @@ function initApp() {
           g.players.push(name);
           if(g.teams) g.teams[name] = 'A';
         }
-        saveConfig(); render();
+        render();
       }; }
       if(action==='set-round-team'){ el.onchange=()=>{
-        const g = state.config.rounds[el.dataset.round][el.dataset.gi];
+        const g = state.configDraft.rounds[el.dataset.round][el.dataset.gi];
         if(!g.teams) g.teams={};
         g.teams[el.dataset.player] = el.value;
+        render();
+      }; }
+      if(action==='admin-roster-save'){ el.onclick=()=>{
+        state.config = state.configDraft;
+        state.configDraft = null;
         saveConfig();
+        state.rosterSavedMsg = 'Saved!';
+        render();
+        setTimeout(()=>{ state.rosterSavedMsg=''; render(); }, 2500);
+      }; }
+      if(action==='admin-roster-discard'){ el.onclick=()=>{
+        if(!isRosterDraftDirty() || confirm('Discard unsaved roster/tee-time changes?')){
+          state.configDraft = JSON.parse(JSON.stringify(state.config));
+          render();
+        }
       }; }
       if(action==='pick-round'){ el.onchange=()=>{
         state.activeRoundId=el.value; state.activeHole=1;
@@ -2508,7 +2524,11 @@ function initApp() {
         }
       }; }
       // ---- Admin ----
-      if(action==='admin-nav'){ el.onclick=()=>{ state.adminView=el.dataset.view; render(); }; }
+      if(action==='admin-nav'){ el.onclick=()=>{
+        const nextView = el.dataset.view;
+        if(nextView!==state.adminView && !confirmLeaveRoster()) return;
+        state.adminView=nextView; render();
+      }; }
       if(action==='admin-pick-round'){ el.onchange=()=>{
         state.adminRoundId=el.value; state.adminHole=1;
         const gs = groupsForRound(state.adminRoundId);
@@ -2660,6 +2680,12 @@ function initApp() {
     }
   }, {passive:false});
   window.addEventListener('touchend', ()=>{ ptrStartY = null; }, {passive:true});
+
+  window.addEventListener('beforeunload', (e:any)=>{
+    if(state.adminView==='roster' && isRosterDraftDirty()){
+      e.preventDefault(); e.returnValue='';
+    }
+  });
 
   load();
 }
