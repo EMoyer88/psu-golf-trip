@@ -11,6 +11,7 @@ import {
   LEADERBOARD_FLAVOR, EMPTY_STATES, LAST_PLACE_LABEL, MATCH_COMMENTARY, AUTO_POST_CONFIG,
   pickMatchCommentary, pickPlayerLine,
 } from '@/lib/trashTalk';
+import { LUNCH_MENU, LUNCH_MODIFIERS, LUNCH_ORDER_DEADLINE, LUNCH_READY_TIME_LABEL } from '@/lib/lunchMenu';
 
 export default function Page() {
   const mounted = useRef(false);
@@ -55,6 +56,12 @@ function initApp() {
     payments: [],
     chat: [],
     autoPostFlags: {},
+    scoreAuditLog: [],
+    auditFilterRound: 'all',
+    auditFilterPlayer: 'all',
+    lunchOrders: {},
+    lunchOrderDraft: null,
+    lunchOrderSavedMsg: '',
     loaded:false,
     activeRoundId: autoRoundId(),
     activeGroupId: null,
@@ -91,6 +98,8 @@ function initApp() {
     const pay = await kvGet('payments'); if(pay) state.payments = pay;
     const ch = await kvGet('chat'); if(ch) state.chat = ch;
     const apf = await kvGet('auto-post-flags'); if(apf) state.autoPostFlags = apf;
+    const sal = await kvGet('score-audit-log'); if(sal) state.scoreAuditLog = sal;
+    const lo = await kvGet('lunch-orders'); if(lo) state.lunchOrders = lo;
 
     try{ state.myEmail = localStorage.getItem('golf-my-email') || null; }catch(e){ state.myEmail = null; }
     recomputeSession();
@@ -99,6 +108,7 @@ function initApp() {
     state.activeGroupId = defaultGroupIdForRound(state.activeRoundId);
     render();
     subscribeAll();
+    checkLunchCalloutAutoPost();
   }
 
   function subscribeAll(){
@@ -109,6 +119,8 @@ function initApp() {
     kvSubscribe('payments', (v)=>{ state.payments = v; render(); });
     kvSubscribe('chat', (v)=>{ state.chat = v; render(); });
     kvSubscribe('auto-post-flags', (v)=>{ state.autoPostFlags = v; });
+    kvSubscribe('score-audit-log', (v)=>{ state.scoreAuditLog = v; render(); });
+    kvSubscribe('lunch-orders', (v)=>{ state.lunchOrders = v; render(); });
     kvSubscribe('trip-config', (v)=>{ state.config = v; recomputeSession(); render(); });
   }
 
@@ -131,6 +143,8 @@ function initApp() {
   function savePayments(){ kvSet('payments', state.payments); }
   function saveChat(){ kvSet('chat', state.chat); }
   function saveAutoPostFlags(){ kvSet('auto-post-flags', state.autoPostFlags); }
+  function saveScoreAuditLog(){ kvSet('score-audit-log', state.scoreAuditLog); }
+  function saveLunchOrders(){ kvSet('lunch-orders', state.lunchOrders); }
 
   // ---- roster / groups ----
   function allPlayers(): Player[] { return state.config.roster; }
@@ -329,16 +343,53 @@ function initApp() {
   function getHoleScores(roundId:string, hole:number){
     return state.scores[scoreKey(roundId,hole)] || {};
   }
-  function setScore(roundId:string, hole:number, player:string, val:number){
+  function setScore(roundId:string, hole:number, player:string, val:number, isAdminOverride?:boolean){
     const k = scoreKey(roundId,hole);
     if(!state.scores[k]) state.scores[k] = {};
+    const prevVal = state.scores[k][player]!=null ? state.scores[k][player] : null;
     state.scores[k][player] = val;
     saveScores();
+    logScoreChange(roundId, hole, player, prevVal, val, !!isAdminOverride);
     // Tied directly to this one score-entry action (covers both the normal
     // and admin scoring paths, since both call setScore) — never on
     // render, so editing/correcting a score can't spam the feed by itself.
     checkBirdieEagleAutoPost(roundId, hole, player, val);
     checkMatchMilestoneAutoPosts(roundId);
+  }
+  // Admin-only: fully clear a hole's score back to its normal unentered
+  // state (not a placeholder "0") — for correcting a bad entry, not just
+  // overwriting it with another number.
+  function eraseScore(roundId:string, hole:number, player:string){
+    const k = scoreKey(roundId,hole);
+    const prevVal = (state.scores[k] && state.scores[k][player]!=null) ? state.scores[k][player] : null;
+    if(state.scores[k]) delete state.scores[k][player];
+    saveScores();
+    logScoreChange(roundId, hole, player, prevVal, null, true);
+    // Same flag reset an edit-away-from-a-birdie already does, so a future
+    // genuinely-new qualifying score can still post.
+    const flagKey = `${roundId}-h${hole}-${player}`;
+    if(state.autoPostFlags[flagKey]){
+      state.autoPostFlags[flagKey] = null;
+      saveAutoPostFlags();
+    }
+    checkMatchMilestoneAutoPosts(roundId);
+  }
+
+  // ---- score-entry audit log (append-only; troubleshooting tool, admin-only view) ----
+  function logScoreChange(roundId:string, hole:number, player:string, prevVal:number|null, newVal:number|null, isAdminOverride:boolean){
+    const actor = state.session ? state.session.name : (state.myEmail || 'Unknown');
+    state.scoreAuditLog.push({
+      id: Date.now()+'-'+Math.random().toString(36).slice(2,7),
+      time: new Date().toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'}),
+      actor,
+      roundId,
+      hole,
+      player,
+      prevValue: prevVal==null ? 'blank' : prevVal,
+      newValue: newVal==null ? 'erased' : newVal,
+      isAdminOverride,
+    });
+    saveScoreAuditLog();
   }
 
   // ---- automatic "⛳ Live Update" feed posts for live scoring events ----
@@ -604,6 +655,24 @@ function initApp() {
         }
       }
     });
+  }
+  // Friday 5pm lunch-order cutoff callout. No backend cron exists, so this
+  // is checked client-side — once after load() and on a periodic timer (see
+  // initApp) — whenever anyone has the app open at/after the deadline. A
+  // persisted flag (reused from autoPostFlags, synced like every other
+  // auto-post flag) makes sure only the first client to notice posts.
+  function checkLunchCalloutAutoPost(){
+    if(!AUTO_POST_CONFIG.enabled.lunchCallout) return;
+    if(state.autoPostFlags['lunch-callout']) return;
+    if(Date.now() < LUNCH_ORDER_DEADLINE.getTime()) return;
+    state.autoPostFlags['lunch-callout'] = true;
+    saveAutoPostFlags();
+    const missing = allPlayerNames().filter((n:string)=>!state.lunchOrders[n]);
+    const text = missing.length===0
+      ? AUTO_POST_CONFIG.templates.lunchCalloutAllIn()
+      : AUTO_POST_CONFIG.templates.lunchCalloutMissing(missing);
+    pushAutoPost(text);
+    render();
   }
   // Hole-by-hole replay of a 2v2 match — same rules/clinch logic as
   // twoVTwoResults, but returns a per-hole record (gross scores, per-hole
@@ -1733,6 +1802,7 @@ function initApp() {
             </span>`;
           }).join('')}
           <button class="link-btn" style="font-size:11px;margin-left:auto;" data-action="toggle-reply" data-mid="${esc(m.id||'')}">Reply${replies.length? ` (${replies.length})`:''}</button>
+          ${isAdmin()? `<button class="link-btn" style="font-size:11px;color:var(--danger-text);" data-action="admin-delete-post" data-mid="${esc(m.id||'')}">Delete</button>` : ''}
         </div>
         ${replying? `
         <div style="margin-top:8px;padding-top:8px;border-top:1px solid var(--border);">
@@ -1802,6 +1872,7 @@ function initApp() {
           <button class="btn primary block" data-action="go-auth">Sign in</button>
         `}
       </div>
+      ${renderLunchOrderSection()}
       <div class="card">
         <h3>About this app</h3>
         <div style="font-size:12px;color:var(--text-secondary);line-height:1.5;">
@@ -1821,6 +1892,8 @@ function initApp() {
         <span class="chip ${view==='expenses'?'':'off'}" data-action="admin-nav" data-view="expenses">Expenses</span>
         <span class="chip ${view==='print'?'':'off'}" data-action="admin-nav" data-view="print">Print scorecards</span>
         <span class="chip ${view==='roster'?'':'off'}" data-action="admin-nav" data-view="roster">Roster &amp; groups</span>
+        <span class="chip ${view==='lunch'?'':'off'}" data-action="admin-nav" data-view="lunch">Lunch orders</span>
+        <span class="chip ${view==='audit'?'':'off'}" data-action="admin-nav" data-view="audit">Score audit log</span>
         <span class="chip ${view==='danger'?'':'off'}" data-action="admin-nav" data-view="danger">Danger zone</span>
       </div>
       ${view==='scoring'?renderAdminScoring()
@@ -1828,6 +1901,8 @@ function initApp() {
         : view==='expenses'?renderAdminExpenses()
         : view==='print'?renderAdminPrint()
         : view==='roster'?renderRosterEditor()
+        : view==='lunch'?renderAdminLunchOrders()
+        : view==='audit'?renderAdminAuditLog()
         : renderAdminDanger()}
     `;
   }
@@ -1888,9 +1963,217 @@ function initApp() {
             <div class="scorestrip" style="flex:1;">
               ${optsN.map(n=>`<button class="scorebtn-sm ${n===val?'selected':''}" data-action="admin-set-score" data-player="${esc(name)}" data-val="${n}">${n}</button>`).join('')}
             </div>
+            <button class="btn small" data-action="admin-erase-score" data-player="${esc(name)}" ${val==null?'disabled':''}>✕ Clear</button>
           </div>`;
         }).join('')}
         `}
+      </div>
+    `;
+  }
+
+  function renderAdminAuditLog(){
+    const roundFilter = state.auditFilterRound || 'all';
+    const playerFilter = state.auditFilterPlayer || 'all';
+    let entries = state.scoreAuditLog.slice().reverse();
+    if(roundFilter!=='all') entries = entries.filter((e:any)=>e.roundId===roundFilter);
+    if(playerFilter!=='all') entries = entries.filter((e:any)=>e.player===playerFilter);
+    return `
+      <div class="card">
+        <h3>Score audit log</h3>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Every score set, changed, or erased — troubleshooting tool, not shown to players. Append-only.</div>
+        <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
+          <select data-action="audit-filter-round">
+            <option value="all" ${roundFilter==='all'?'selected':''}>All rounds</option>
+            ${ROUNDS.map(r=>`<option value="${r.id}" ${r.id===roundFilter?'selected':''}>${esc(r.label)}</option>`).join('')}
+          </select>
+          <select data-action="audit-filter-player">
+            <option value="all" ${playerFilter==='all'?'selected':''}>All players</option>
+            ${allPlayerNames().map(n=>`<option value="${esc(n)}" ${n===playerFilter?'selected':''}>${esc(n)}</option>`).join('')}
+          </select>
+        </div>
+        ${entries.length===0? '<div class="empty">No matching entries.</div>' : entries.map((e:any)=>`
+          <div style="padding:8px 0;border-bottom:1px solid var(--border);font-size:12px;">
+            <div style="display:flex;justify-content:space-between;">
+              <b>${esc(e.player)}</b><span style="color:var(--text-muted);">${esc(e.time)}</span>
+            </div>
+            <div>${esc(roundOf(e.roundId).label)} · Hole ${e.hole} — ${esc(String(e.prevValue))} → ${esc(String(e.newValue))} ${e.isAdminOverride?'<span class="pill gold" style="font-size:9px;">ADMIN</span>':''}</div>
+            <div style="color:var(--text-secondary);">by ${esc(e.actor)}</div>
+          </div>
+        `).join('')}
+      </div>
+    `;
+  }
+
+  // ---- Saturday lunch pre-order helpers ----
+  function lunchFindItem(itemId:string){
+    for(const cat of LUNCH_MENU){ const it = cat.items.find(i=>i.id===itemId); if(it) return it; }
+    return null;
+  }
+  function lunchLineFor(draft:any, itemId:string){
+    return draft.lines.find((l:any)=>l.itemId===itemId);
+  }
+  function lunchLinePrice(line:any){
+    const item = lunchFindItem(line.itemId);
+    if(!item) return 0;
+    let unit = item.price;
+    if(line.modifiers?.subFries) unit += LUNCH_MODIFIERS.find(m=>m.id==='subFries')!.price;
+    if(line.modifiers?.wrap) unit += LUNCH_MODIFIERS.find(m=>m.id==='wrap')!.price;
+    return unit * line.qty;
+  }
+  function lunchDraftTotal(draft:any){
+    return draft.lines.reduce((sum:number,l:any)=>sum+lunchLinePrice(l), 0);
+  }
+  function lunchOrderModsLabel(l:any){
+    return [l.choice, l.modifiers?.subFries?'sub fries':null, l.modifiers?.wrap?'wrap':null].filter(Boolean).join(', ');
+  }
+  function renderLunchMenuItems(draft:any, readonly:boolean){
+    return LUNCH_MENU.map(cat=>`
+      <div style="margin-bottom:14px;">
+        <div style="font-size:11px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.02em;margin-bottom:6px;">${esc(cat.label)}</div>
+        ${cat.items.map((item:any)=>{
+          const line = lunchLineFor(draft, item.id);
+          const qty = line? line.qty : 0;
+          if(readonly && qty<=0) return '';
+          return `
+          <div style="padding:8px 0;border-bottom:1px solid var(--border);">
+            <div style="display:flex;align-items:center;justify-content:space-between;">
+              <span style="font-size:13px;font-weight:600;">${esc(item.name)}</span>
+              <span style="font-size:12px;color:var(--text-secondary);">${fmtMoney(item.price)}</span>
+            </div>
+            ${!readonly ? `
+            <div style="display:flex;align-items:center;gap:10px;margin-top:6px;">
+              <button class="btn small" data-action="lunch-qty" data-item="${item.id}" data-delta="-1" ${qty<=0?'disabled':''}>−</button>
+              <span style="min-width:16px;text-align:center;font-weight:600;">${qty}</span>
+              <button class="btn small" data-action="lunch-qty" data-item="${item.id}" data-delta="1">+</button>
+            </div>
+            ${qty>0 && item.choice? `
+            <select data-action="lunch-choice" data-item="${item.id}" style="margin-top:6px;">
+              <option value="">Choose ${esc(item.choice.label.toLowerCase())}…</option>
+              ${item.choice.options.map((o:string)=>`<option value="${esc(o)}" ${line?.choice===o?'selected':''}>${esc(o)}</option>`).join('')}
+            </select>` : ''}
+            ${qty>0 && cat.modifiersAllowed? `
+            <div style="margin-top:6px;display:flex;flex-direction:column;gap:4px;">
+              ${LUNCH_MODIFIERS.map(mod=>`
+                <label style="font-size:12px;display:flex;align-items:center;gap:6px;">
+                  <input type="checkbox" data-action="lunch-modifier" data-item="${item.id}" data-mod="${mod.id}" ${(line?.modifiers as any)?.[mod.id]?'checked':''}/>
+                  ${esc(mod.label)} (+${fmtMoney(mod.price)})
+                </label>
+              `).join('')}
+            </div>` : ''}
+            ` : `
+            <div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">
+              Qty ${qty}${lunchOrderModsLabel(line)? ` · ${esc(lunchOrderModsLabel(line))}` : ''}
+            </div>`}
+          </div>`;
+        }).join('')}
+      </div>
+    `).join('');
+  }
+  function renderLunchOrderSummary(draft:any){
+    if(draft.lines.length===0) return `<div class="empty" style="padding:10px 0;">No items selected yet.</div>`;
+    return `
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);">
+        ${draft.lines.map((l:any)=>{
+          const item = lunchFindItem(l.itemId);
+          if(!item) return '';
+          const mods = lunchOrderModsLabel(l);
+          return `<div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px;">
+            <span>${l.qty}x ${esc(item.name)}${mods? ` <span style="color:var(--text-muted);">(${esc(mods)})</span>`:''}</span>
+            <span>${fmtMoney(lunchLinePrice(l))}</span>
+          </div>`;
+        }).join('')}
+        <div style="display:flex;justify-content:space-between;font-weight:700;font-size:14px;margin-top:8px;padding-top:8px;border-top:1px solid var(--border);">
+          <span>Total</span><span>${fmtMoney(lunchDraftTotal(draft))}</span>
+        </div>
+      </div>
+    `;
+  }
+  function renderLunchOrderSection(){
+    if(!state.session) return '';
+    const locked = Date.now() >= LUNCH_ORDER_DEADLINE.getTime();
+    const deadlineLabel = LUNCH_ORDER_DEADLINE.toLocaleString([], {weekday:'long', hour:'numeric', minute:'2-digit'});
+    const existing = state.lunchOrders[state.session.name];
+    if(locked){
+      return `
+        <div class="card">
+          <h3>🌭 Saturday Lunch Order</h3>
+          <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Orders closed ${esc(deadlineLabel)}.</div>
+          ${existing? renderLunchMenuItems(existing, true) : `<div class="empty">You didn't submit an order.</div>`}
+        </div>
+      `;
+    }
+    if(!state.lunchOrderDraft){
+      state.lunchOrderDraft = existing ? JSON.parse(JSON.stringify(existing)) : { lines: [] };
+    }
+    const draft = state.lunchOrderDraft;
+    return `
+      <div class="card">
+        <h3>🌭 Saturday Lunch Order</h3>
+        <div style="font-size:12px;color:var(--danger-text);font-weight:600;margin-bottom:10px;">Order by ${esc(deadlineLabel)} or you're excluded from the order.</div>
+        ${renderLunchMenuItems(draft, false)}
+        ${renderLunchOrderSummary(draft)}
+        ${state.lunchOrderSavedMsg? `<div style="font-size:12px;color:var(--success-text);margin-top:8px;">${esc(state.lunchOrderSavedMsg)}</div>` : ''}
+        <button class="btn primary block" style="margin-top:12px;" data-action="lunch-submit">${existing? 'Update order' : 'Submit order'}</button>
+      </div>
+    `;
+  }
+  function renderAdminLunchOrders(){
+    const orders = state.lunchOrders;
+    const submittedNames = Object.keys(orders);
+    const missing = allPlayerNames().filter((n:string)=>!orders[n]);
+    const grouped: Record<string, {item:any, totalQty:number, entries:{player:string, qty:number, choice?:string, modifiers?:any}[]}> = {};
+    let grandItems = 0, grandTotal = 0;
+    submittedNames.forEach(name=>{
+      const o = orders[name];
+      o.lines.forEach((l:any)=>{
+        const item = lunchFindItem(l.itemId);
+        if(!item) return;
+        if(!grouped[l.itemId]) grouped[l.itemId] = { item, totalQty:0, entries:[] };
+        grouped[l.itemId].totalQty += l.qty;
+        grouped[l.itemId].entries.push({ player:name, qty:l.qty, choice:l.choice, modifiers:l.modifiers });
+        grandItems += l.qty;
+        grandTotal += lunchLinePrice(l);
+      });
+    });
+    return `
+      <div class="card" style="text-align:center;">
+        <h3 style="margin:0;">🌭 Saturday Lunch — ready ${esc(LUNCH_READY_TIME_LABEL)}</h3>
+        <div style="font-size:12px;color:var(--text-secondary);margin-top:2px;">Combined clubhouse order</div>
+      </div>
+      <div class="card">
+        <h3>By item</h3>
+        ${Object.keys(grouped).length===0? '<div class="empty">No orders yet.</div>' : Object.values(grouped).map(g=>`
+          <div style="padding:8px 0;border-bottom:1px solid var(--border);">
+            <div style="font-weight:700;font-size:13px;">${esc(g.item.name)} x${g.totalQty}</div>
+            ${g.entries.map(e=>`<div style="font-size:12px;color:var(--text-secondary);margin-left:8px;">${esc(e.player)} (${e.qty})${e.choice?` — ${esc(e.choice)}`:''}${e.modifiers?.subFries?' — sub fries':''}${e.modifiers?.wrap?' — wrap':''}</div>`).join('')}
+          </div>
+        `).join('')}
+      </div>
+      <div class="card">
+        <h3>By person</h3>
+        ${submittedNames.length===0? '<div class="empty">No orders yet.</div>' : submittedNames.map(name=>{
+          const o = orders[name];
+          const total = o.lines.reduce((s:number,l:any)=>s+lunchLinePrice(l),0);
+          return `
+          <div style="padding:8px 0;border-bottom:1px solid var(--border);">
+            <div style="font-weight:700;font-size:13px;">${esc(name)} — ${fmtMoney(total)}</div>
+            ${o.lines.map((l:any)=>{
+              const item = lunchFindItem(l.itemId);
+              if(!item) return '';
+              const mods = lunchOrderModsLabel(l);
+              return `<div style="font-size:12px;color:var(--text-secondary);margin-left:8px;">${l.qty}x ${esc(item.name)}${mods?` (${esc(mods)})`:''}</div>`;
+            }).join('')}
+          </div>`;
+        }).join('')}
+      </div>
+      <div class="card">
+        <h3>Totals</h3>
+        <div style="font-size:13px;">Items: <b>${grandItems}</b></div>
+        <div style="font-size:13px;">Total: <b>${fmtMoney(grandTotal)}</b></div>
+      </div>
+      <div class="card" style="${missing.length?'border-color:var(--danger-text);':''}">
+        <h3>Didn't order (${missing.length})</h3>
+        ${missing.length===0? '<div class="empty">Everyone ordered!</div>' : missing.map((n:string)=>`<span class="chip off" style="margin:2px;">${esc(n)}</span>`).join('')}
       </div>
     `;
   }
@@ -2523,6 +2806,51 @@ function initApp() {
           render();
         }
       }; }
+      if(action==='admin-delete-post'){ el.onclick=()=>{
+        if(!confirm('Delete this post? Its replies and reactions will be removed too.')) return;
+        const mid = el.dataset.mid;
+        state.chat = state.chat.filter((m:any)=>String(m.id)!==mid);
+        saveChat();
+        render();
+      }; }
+      // ---- Saturday lunch pre-order ----
+      if(action==='lunch-qty'){ el.onclick=()=>{
+        const itemId = el.dataset.item;
+        const delta = parseInt(el.dataset.delta,10);
+        const draft = state.lunchOrderDraft;
+        let line = lunchLineFor(draft, itemId);
+        if(!line){ line = {itemId, qty:0, modifiers:{}}; draft.lines.push(line); }
+        line.qty = Math.max(0, line.qty+delta);
+        if(line.qty===0){ draft.lines = draft.lines.filter((l:any)=>l!==line); }
+        render();
+      }; }
+      if(action==='lunch-choice'){ el.onchange=()=>{
+        const line = lunchLineFor(state.lunchOrderDraft, el.dataset.item);
+        if(line) line.choice = el.value;
+        render();
+      }; }
+      if(action==='lunch-modifier'){ el.onchange=()=>{
+        const line = lunchLineFor(state.lunchOrderDraft, el.dataset.item);
+        if(line){ if(!line.modifiers) line.modifiers={}; line.modifiers[el.dataset.mod] = el.checked; }
+        render();
+      }; }
+      if(action==='lunch-submit'){ el.onclick=()=>{
+        const draft = state.lunchOrderDraft;
+        for(const line of draft.lines){
+          const item = lunchFindItem(line.itemId);
+          if(item?.choice && !line.choice){
+            alert(`Pick a ${item.choice.label.toLowerCase()} for ${item.name}.`);
+            return;
+          }
+        }
+        if(draft.lines.length===0 && !confirm('Submit an empty order (no lunch)?')) return;
+        state.lunchOrders[state.session.name] = { player: state.session.name, lines: JSON.parse(JSON.stringify(draft.lines)), submittedAt: Date.now() };
+        saveLunchOrders();
+        state.lunchOrderDraft = null;
+        state.lunchOrderSavedMsg = 'Order submitted!';
+        render();
+        setTimeout(()=>{ state.lunchOrderSavedMsg=''; render(); }, 2500);
+      }; }
       // ---- Admin ----
       if(action==='admin-nav'){ el.onclick=()=>{
         const nextView = el.dataset.view;
@@ -2549,9 +2877,17 @@ function initApp() {
       }; }
       if(action==='admin-set-score'){ el.onclick=()=>{
         const roundId = state.adminRoundId || autoRoundId();
-        setScore(roundId, state.adminHole, el.dataset.player, parseInt(el.dataset.val,10));
+        setScore(roundId, state.adminHole, el.dataset.player, parseInt(el.dataset.val,10), true);
         render();
       }; }
+      if(action==='admin-erase-score'){ el.onclick=()=>{
+        const roundId = state.adminRoundId || autoRoundId();
+        if(!confirm(`Erase ${el.dataset.player}'s score for hole ${state.adminHole}? This can't be undone.`)) return;
+        eraseScore(roundId, state.adminHole, el.dataset.player);
+        render();
+      }; }
+      if(action==='audit-filter-round'){ el.onchange=()=>{ state.auditFilterRound = el.value; render(); }; }
+      if(action==='audit-filter-player'){ el.onchange=()=>{ state.auditFilterPlayer = el.value; render(); }; }
       if(action==='admin-edit-expense'){ el.onclick=()=>{ state.adminExpenseEditingId=parseInt(el.dataset.idx,10); render(); }; }
       if(action==='admin-cancel-edit-expense'){ el.onclick=()=>{ state.adminExpenseEditingId=null; render(); }; }
       if(action==='admin-delete-expense'){ el.onclick=()=>{
@@ -2686,6 +3022,10 @@ function initApp() {
       e.preventDefault(); e.returnValue='';
     }
   });
+
+  // No backend cron exists — catch the Friday 5pm lunch-order cutoff for
+  // anyone who already has the app open by polling once a minute.
+  setInterval(checkLunchCalloutAutoPost, 60000);
 
   load();
 }

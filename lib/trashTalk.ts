@@ -137,6 +137,7 @@ export const AUTO_POST_CONFIG = {
     eagle: true,
     matchClinched: true,
     bigLeadMilestone: true,
+    lunchCallout: true,
   },
   // Lead (in holes) a team must reach for the "pulling away" milestone —
   // fires once per match, the first time a lead reaches this size.
@@ -150,5 +151,12 @@ export const AUTO_POST_CONFIG = {
         : `🏆 ${winningTeam} close it out, ${margin} UP over ${losingTeam}.`,
     bigLeadMilestone: (leadingTeam: string, trailingTeam: string, margin: number) =>
       `📈 ${leadingTeam} pulling away, now ${margin} UP on ${trailingTeam}.`,
+    // Friday 5pm lunch-order cutoff callout — one or the other, never both.
+    lunchCalloutMissing: (names: string[]) => {
+      const list = names.length===1 ? names[0]
+        : names.slice(0,-1).join(', ') + ', and ' + names[names.length-1];
+      return `🌭 Lunch orders are closed. ${list} apparently don't eat. Enjoy watching everyone else at 12:30.`;
+    },
+    lunchCalloutAllIn: () => `🌭 Lunch orders closed — everyone's in. Miracle.`,
   },
 };
