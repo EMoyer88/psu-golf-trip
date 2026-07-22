@@ -111,6 +111,9 @@ table.sc td.name{text-align:left;font-weight:700;background:#fff;color:var(--tex
 .matchup .teampts{font-size:22px;font-weight:700;color:var(--text-muted);}
 .matchup .teamcol.leading .teampts{color:var(--success-text);}
 .matchup .vs{font-size:11px;color:var(--text-muted);font-weight:600;}
+.matchup .player-grid{display:flex;flex-wrap:wrap;justify-content:center;gap:8px 6px;}
+.matchup .player-card{display:flex;flex-direction:column;align-items:center;gap:4px;width:58px;}
+.matchup .player-card-name{font-size:11px;font-weight:600;color:var(--text);text-align:center;line-height:1.15;word-break:break-word;}
 
 @keyframes mullpulse{0%,100%{opacity:1;}50%{opacity:0.25;}}
 

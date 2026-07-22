@@ -951,19 +951,27 @@ function initApp() {
   }
 
   function renderPairingCard(labelLeft:string, playersLeft:string[], labelRight:string, playersRight:string[]){
-    function names(list:string[]){
-      return list.map(n=>`<span style="display:inline-flex;align-items:center;gap:4px;margin:2px 6px 2px 0;">${avatarHtml(findPlayerObj(n),24)}<span style="font-size:12px;">${esc(n)}</span></span>`).join('');
+    // Bigger vertical player cards (photo on top, name centered underneath)
+    // arranged as a small wrapping grid per team — the photo is the
+    // dominant element here, not a small icon beside the name.
+    function playerCards(list:string[]){
+      return list.map(n=>`
+        <div class="player-card">
+          ${avatarHtml(findPlayerObj(n), 54)}
+          <span class="player-card-name">${esc(n)}</span>
+        </div>
+      `).join('');
     }
     return `
       <div class="matchup" style="margin-bottom:8px;">
         <div class="teamcol">
-          <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;">${esc(labelLeft)}</div>
-          <div class="teamnames" style="display:flex;flex-wrap:wrap;justify-content:center;">${names(playersLeft)}</div>
+          <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;">${esc(labelLeft)}</div>
+          <div class="player-grid">${playerCards(playersLeft)}</div>
         </div>
         <div class="vs">VS</div>
         <div class="teamcol">
-          <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;">${esc(labelRight)}</div>
-          <div class="teamnames" style="display:flex;flex-wrap:wrap;justify-content:center;">${names(playersRight)}</div>
+          <div style="font-size:10px;color:var(--text-muted);margin-bottom:6px;">${esc(labelRight)}</div>
+          <div class="player-grid">${playerCards(playersRight)}</div>
         </div>
       </div>
     `;
