@@ -343,11 +343,29 @@ function initApp() {
   function getHoleScores(roundId:string, hole:number){
     return state.scores[scoreKey(roundId,hole)] || {};
   }
-  function setScore(roundId:string, hole:number, player:string, val:number, isAdminOverride?:boolean){
+  // saveScores() below always persists the WHOLE scores blob (one JSON
+  // value per kv_store row) — never a scoped per-field update. That means
+  // if this client's in-memory state.scores is stale relative to the
+  // server (e.g. it missed an external reset like a Danger Zone clear or a
+  // manual DB edit while its tab was open), saving ANY new tap would
+  // silently resurrect old, unrelated holes/players it still has cached —
+  // a real bug previously seen as a "phantom" score reappearing after a
+  // clear, written straight to the DB with no corresponding audit-log
+  // entry (only the one field the user actually changed gets logged).
+  // Fix: always re-fetch the current server copy immediately before
+  // merging in the one intended change, so a stale client can never push
+  // back more than what it explicitly just changed.
+  async function setScore(roundId:string, hole:number, player:string, val:number, isAdminOverride?:boolean){
     const k = scoreKey(roundId,hole);
+    // Optimistic local update so the tap feels instant.
     if(!state.scores[k]) state.scores[k] = {};
-    const prevVal = state.scores[k][player]!=null ? state.scores[k][player] : null;
     state.scores[k][player] = val;
+    render();
+    const fresh = (await kvGet('scores')) || {};
+    if(!fresh[k]) fresh[k] = {};
+    const prevVal = fresh[k][player]!=null ? fresh[k][player] : null;
+    fresh[k][player] = val;
+    state.scores = fresh;
     saveScores();
     logScoreChange(roundId, hole, player, prevVal, val, !!isAdminOverride);
     // Tied directly to this one score-entry action (covers both the normal
@@ -355,14 +373,20 @@ function initApp() {
     // render, so editing/correcting a score can't spam the feed by itself.
     checkBirdieEagleAutoPost(roundId, hole, player, val);
     checkMatchMilestoneAutoPosts(roundId);
+    render();
   }
   // Admin-only: fully clear a hole's score back to its normal unentered
   // state (not a placeholder "0") — for correcting a bad entry, not just
-  // overwriting it with another number.
-  function eraseScore(roundId:string, hole:number, player:string){
+  // overwriting it with another number. Same fresh-fetch-before-write
+  // treatment as setScore(), for the same reason.
+  async function eraseScore(roundId:string, hole:number, player:string){
     const k = scoreKey(roundId,hole);
-    const prevVal = (state.scores[k] && state.scores[k][player]!=null) ? state.scores[k][player] : null;
     if(state.scores[k]) delete state.scores[k][player];
+    render();
+    const fresh = (await kvGet('scores')) || {};
+    const prevVal = (fresh[k] && fresh[k][player]!=null) ? fresh[k][player] : null;
+    if(fresh[k]) delete fresh[k][player];
+    state.scores = fresh;
     saveScores();
     logScoreChange(roundId, hole, player, prevVal, null, true);
     // Same flag reset an edit-away-from-a-birdie already does, so a future
@@ -373,6 +397,7 @@ function initApp() {
       saveAutoPostFlags();
     }
     checkMatchMilestoneAutoPosts(roundId);
+    render();
   }
 
   // ---- score-entry audit log (append-only; troubleshooting tool, admin-only view) ----
@@ -2280,13 +2305,15 @@ function initApp() {
     `;
   }
 
-  // Deletes scores, mulligans, and beaver-ball state for one round. Match/
-  // leaderboard results (Friday best-ball, Saturday 2v2) aren't stored
-  // anywhere separately — they're always recomputed live from scores, so
-  // clearing scores here is sufficient to reset them too.
+  // Deletes mulligans and beaver-ball state for one round. Scores are
+  // handled separately by the caller (danger-clear-scores below) since
+  // that path needs a fresh-fetched copy and per-entry audit logging —
+  // see setScore()'s comment for why. Match/leaderboard results (Friday
+  // best-ball, Saturday 2v2) aren't stored anywhere separately — they're
+  // always recomputed live from scores, so clearing scores is sufficient
+  // to reset them too.
   function clearRoundData(roundId:string){
     const round = roundOf(roundId);
-    round.holes.forEach(h=>{ delete state.scores[scoreKey(roundId,h.n)]; });
     delete state.mulligans[roundId];
     groupsForRound(roundId).forEach(g=>{
       round.holes.forEach(h=>{ delete state.beaver[beaverKey(roundId,g.id,h.n)]; });
@@ -2939,13 +2966,32 @@ function initApp() {
       if(action==='print-one'){ el.onclick=()=>{ state.printMode='one'; render(); setTimeout(()=>window.print(),50); }; }
       if(action==='print-all'){ el.onclick=()=>{ state.printMode='all'; render(); setTimeout(()=>window.print(),50); }; }
       if(action==='danger-pick-round'){ el.onchange=()=>{ state.dangerRoundId=el.value; render(); }; }
-      if(action==='danger-clear-scores'){ el.onclick=()=>{
+      if(action==='danger-clear-scores'){ el.onclick=async ()=>{
         const input = document.getElementById('danger-confirm-input') as HTMLInputElement | null;
         if(!input || input.value.trim()!=='CLEAR'){ alert('Type CLEAR (all caps) in the box to confirm.'); return; }
         const target = state.dangerRoundId || 'all';
         const roundIds = target==='all' ? ROUNDS.map(r=>r.id) : [target];
         const label = target==='all' ? 'ALL rounds' : roundOf(target).label;
         if(!confirm(`This will permanently delete all scores, mulligans, and beaver-ball data for ${label}. This cannot be undone. Continue?`)) return;
+        // Fresh-fetch scores first (same reason as setScore()'s comment —
+        // this admin's cached copy may be stale) and log every real value
+        // being wiped, so a bulk clear can never silently bypass the
+        // audit log the way the old version did.
+        const freshScores = (await kvGet('scores')) || {};
+        roundIds.forEach(roundId=>{
+          const round = roundOf(roundId);
+          round.holes.forEach(h=>{
+            const k = scoreKey(roundId, h.n);
+            const holeScores = freshScores[k];
+            if(holeScores){
+              Object.keys(holeScores).forEach(player=>{
+                if(holeScores[player]!=null) logScoreChange(roundId, h.n, player, holeScores[player], null, true);
+              });
+            }
+            delete freshScores[k];
+          });
+        });
+        state.scores = freshScores;
         roundIds.forEach(clearRoundData);
         saveScores(); saveMulligans(); saveBeaver();
         input.value='';
