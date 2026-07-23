@@ -574,11 +574,13 @@ function initApp() {
     });
     return {diff, played};
   }
-  // Friday is a standalone exhibition round and never feeds the cumulative
-  // tournament leaderboard — Saturday AM + PM combine into one 36-hole total
-  // instead. Used for gross/net/mullies; birdieEagleCount below already only
-  // looks at trackBirdies rounds (satam+satpm), so it needs no change.
+  // Saturday AM + PM combine into one 36-hole tournament total on the
+  // Leaders tab (both tabs show identical numbers); Friday gets its own
+  // separate, Friday-only version of the same gross/net/birdies sections
+  // — see renderBoard(). ALL_ROUND_IDS is for Shotgun Mullies, which is a
+  // full-trip total regardless of which round tab is selected.
   const SAT_ROUND_IDS = ['satam', 'satpm'];
+  const ALL_ROUND_IDS = ROUNDS.map(r=>r.id);
   function toParForRounds(roundIds:string[], player:string){
     let diff=0, played=0;
     roundIds.forEach(rid=>{
@@ -598,11 +600,11 @@ function initApp() {
   function mulligansForRounds(roundIds:string[], player:string){
     return roundIds.reduce((sum,rid)=>sum+getMulligans(rid,player),0);
   }
-  function birdieEagleCount(player:string){
+  function birdieEagleCountForRounds(roundIds:string[], player:string){
     let birdies=0, eagles=0;
-    ROUNDS.filter(r=>r.trackBirdies).forEach(r=>{
-      r.holes.forEach(h=>{
-        const sc = getHoleScores(r.id,h.n);
+    roundIds.forEach(rid=>{
+      roundOf(rid).holes.forEach(h=>{
+        const sc = getHoleScores(rid,h.n);
         const s = sc[player];
         if(s==null) return;
         const d = s - h.par;
@@ -1587,26 +1589,33 @@ function initApp() {
     const current = autoRoundId();
     const round = roundOf(state.boardRoundId || current);
 
-    // Combined Saturday (AM+PM) tournament totals — Friday is a standalone
-    // exhibition round and never contributes here.
+    // Gross/net/birdies are scoped by whichever round tab is selected:
+    // Friday gets its own standalone Friday-only version; either Saturday
+    // tab shows the identical combined 36-hole (AM+PM) total, since
+    // Saturday is one combined tournament, not two separate ones.
+    const isFriTab = round.id==='fri';
+    const scopedRoundIds = isFriTab ? ['fri'] : SAT_ROUND_IDS;
+
     let grossList = allPlayerNames().map(p=>{
-      const {diff,played} = toParForRounds(SAT_ROUND_IDS,p);
+      const {diff,played} = toParForRounds(scopedRoundIds,p);
       return {p,diff,played};
     }).filter(x=>x.played>0).sort((a,b)=>a.diff-b.diff);
 
     let netList = allPlayerNames().map(p=>{
-      const {diff,played} = netToParForRounds(SAT_ROUND_IDS,p);
+      const {diff,played} = netToParForRounds(scopedRoundIds,p);
       return {p,diff,played};
     }).filter(x=>x.played>0).sort((a,b)=>a.diff-b.diff);
 
-    let mulliganList = allPlayerNames().map(p=>({p, n:mulligansForRounds(SAT_ROUND_IDS,p)}))
+    // Shotgun Mullies is a full-trip total — never scoped by round tab, so
+    // it looks identical no matter which one is selected.
+    let mulliganList = allPlayerNames().map(p=>({p, n:mulligansForRounds(ALL_ROUND_IDS,p)}))
       .filter(x=>x.n>0).sort((a,b)=>b.n-a.n);
 
     // Ranked by eagle count first, birdie count as the tiebreaker — NOT the
     // composite score, so e.g. 1 eagle/0 birdies always outranks 0
     // eagles/2 birdies even though eagles*2+birdies would tie them.
     const bePlayers = allPlayerNames().map(p=>{
-      const be = birdieEagleCount(p);
+      const be = birdieEagleCountForRounds(scopedRoundIds, p);
       return {p, ...be, score: be.eagles*2+be.birdies};
     }).filter(x=>x.score>0).sort((a,b)=> b.eagles-a.eagles || b.birdies-a.birdies);
     const beRanks = computeSharedRanks(bePlayers, (a,b)=>a.eagles===b.eagles && a.birdies===b.birdies);
@@ -1665,17 +1674,17 @@ function initApp() {
       </div>` : `<div class="card"><div class="empty">The 2v2 game runs Saturday AM &amp; PM — set up teams in Admin &gt; Roster &amp; groups.</div></div>`)}
 
       <div class="grid2">
-        ${miniList('gross','⛳ Best to par — gross', grossList, (x:any,i:number)=>leaderRow(x,i,lastGrossName), EMPTY_STATES.leaderboard)}
+        ${miniList('gross',`⛳ Best to par — gross <span style="font-size:10px;font-weight:600;color:var(--text-muted);">(${isFriTab?'Friday only':'Sat 36-hole combined'})</span>`, grossList, (x:any,i:number)=>leaderRow(x,i,lastGrossName), EMPTY_STATES.leaderboard)}
 
-        ${miniList('net','🎯 Best to par — net', netList, (x:any,i:number)=>leaderRow(x,i,lastNetName), EMPTY_STATES.leaderboard)}
+        ${miniList('net',`🎯 Best to par — net <span style="font-size:10px;font-weight:600;color:var(--text-muted);">(${isFriTab?'Friday only':'Sat 36-hole combined'})</span>`, netList, (x:any,i:number)=>leaderRow(x,i,lastNetName), EMPTY_STATES.leaderboard)}
 
-        ${miniList('mullies','🍺 Most Shotgun Mullies', mulliganList, (x:any,i:number)=>`
+        ${miniList('mullies','🍺 Most Shotgun Mullies <span style="font-size:10px;font-weight:600;color:var(--text-muted);">(full trip)</span>', mulliganList, (x:any,i:number)=>`
           <div class="row" style="padding:4px 0;border-bottom:1px solid var(--border);">
             <span style="font-size:12.5px;display:flex;align-items:center;gap:6px;"><b>${i+1}.</b> ${nameCell(x.p)}</span>
             <span style="font-size:12.5px;">${x.n}</span>
           </div>`, EMPTY_STATES.mullies)}
 
-        ${miniList('birdies','🐦 Birdies &amp; 🦅 eagles', bePlayers, (x:any,i:number)=>`
+        ${miniList('birdies',`🐦 Birdies &amp; 🦅 eagles <span style="font-size:10px;font-weight:600;color:var(--text-muted);">(${isFriTab?'Friday only':'Sat combined'})</span>`, bePlayers, (x:any,i:number)=>`
           <div class="row" style="padding:4px 0;border-bottom:1px solid var(--border);">
             <span style="font-size:12.5px;display:flex;align-items:center;gap:6px;"><b>${beRanks[i]}.</b> ${nameCell(x.p)}</span>
             <span style="font-size:11.5px;">${x.birdies}b · ${x.eagles}e</span>

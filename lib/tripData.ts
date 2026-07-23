@@ -34,7 +34,6 @@ export type RoundMeta = {
   course: string;
   par: number;
   yards: number;
-  trackBirdies: boolean;
   holes: Hole[];
   si: number[]; // stroke index per hole, same order as holes
   tee: string;
@@ -49,7 +48,7 @@ export const ADMIN_EMAILS = ['erik.moyer.88@gmail.com', 'gpoli111@gmail.com'];
 
 export const ROUNDS_META: RoundMeta[] = [
   {
-    id: 'fri', label: 'Friday', course: 'Mountain View Country Club', par: 71, yards: 6015, trackBirdies: false,
+    id: 'fri', label: 'Friday', course: 'Mountain View Country Club', par: 71, yards: 6015,
     holes: [
       { n: 1, par: 4, yds: 392 }, { n: 2, par: 3, yds: 102 }, { n: 3, par: 5, yds: 546 }, { n: 4, par: 4, yds: 343 }, { n: 5, par: 4, yds: 258 },
       { n: 6, par: 3, yds: 180 }, { n: 7, par: 5, yds: 457 }, { n: 8, par: 4, yds: 300 }, { n: 9, par: 3, yds: 131 },
@@ -60,7 +59,7 @@ export const ROUNDS_META: RoundMeta[] = [
     tee: 'White',
   },
   {
-    id: 'satam', label: 'Saturday AM', course: 'PSU White Course', par: 72, yards: 6130, trackBirdies: true,
+    id: 'satam', label: 'Saturday AM', course: 'PSU White Course', par: 72, yards: 6130,
     holes: [
       { n: 1, par: 4, yds: 383 }, { n: 2, par: 4, yds: 355 }, { n: 3, par: 5, yds: 532 }, { n: 4, par: 4, yds: 330 }, { n: 5, par: 3, yds: 153 },
       { n: 6, par: 5, yds: 498 }, { n: 7, par: 3, yds: 167 }, { n: 8, par: 4, yds: 350 }, { n: 9, par: 4, yds: 353 },
@@ -71,7 +70,7 @@ export const ROUNDS_META: RoundMeta[] = [
     tee: 'White',
   },
   {
-    id: 'satpm', label: 'Saturday PM', course: 'PSU Blue Course', par: 72, yards: 6329, trackBirdies: true,
+    id: 'satpm', label: 'Saturday PM', course: 'PSU Blue Course', par: 72, yards: 6329,
     holes: [
       { n: 1, par: 4, yds: 360 }, { n: 2, par: 4, yds: 364 }, { n: 3, par: 4, yds: 387 }, { n: 4, par: 3, yds: 182 }, { n: 5, par: 5, yds: 499 },
       { n: 6, par: 4, yds: 383 }, { n: 7, par: 4, yds: 400 }, { n: 8, par: 3, yds: 161 }, { n: 9, par: 5, yds: 507 },
