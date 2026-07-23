@@ -73,6 +73,10 @@ function initApp() {
     scoreDraft: {},
     scoreDraftInitial: {},
     scoreDraftContext: null,
+    // True when a realtime "scores" update lands for the exact hole this
+    // client has open WHILE it has unsaved draft edits of its own — a
+    // heads-up only, never auto-clears the draft or blocks Submit.
+    scoreConflictWarning: false,
     beaverPanelOpen:false,
     mulliganPanelOpen:false,
     scorecardModalOpen:false,
@@ -124,8 +128,25 @@ function initApp() {
     checkLunchCalloutAutoPost();
   }
 
+  // Live conflict heads-up: did someone else's change just land for the
+  // EXACT hole this client has open, while it still has unsaved draft
+  // edits of its own? Compare the old vs new saved values for that one
+  // hole only — never blocks or discards the draft, just flags it.
+  function checkScoreConflict(incomingScores:any){
+    const ctx = state.scoreDraftContext;
+    if(ctx && isScoreDraftDirty()){
+      const k = scoreKey(ctx.roundId, ctx.hole);
+      const before = JSON.stringify(state.scores[k] || {});
+      const after = JSON.stringify(incomingScores[k] || {});
+      if(before!==after) state.scoreConflictWarning = true;
+    }
+  }
   function subscribeAll(){
-    kvSubscribe('scores', (v)=>{ state.scores = v; render(); });
+    kvSubscribe('scores', (v)=>{
+      checkScoreConflict(v);
+      state.scores = v;
+      render();
+    });
     kvSubscribe('mulligans', (v)=>{ state.mulligans = v; render(); });
     kvSubscribe('beaver', (v)=>{ state.beaver = v; render(); });
     kvSubscribe('expenses', (v)=>{ state.expenses = v; render(); });
@@ -1255,15 +1276,34 @@ function initApp() {
     // mutate state.scoreDraft directly and must survive re-renders (e.g.
     // an unrelated realtime update landing while this hole is open)
     // without being clobbered back to the saved/par defaults here.
+    const saved = getHoleScores(round.id, hole.n);
     const ctx = state.scoreDraftContext;
     const isNewHoleContext = !ctx || ctx.roundId!==round.id || ctx.groupId!==group.id || ctx.hole!==hole.n;
     if(isNewHoleContext){
-      const saved = getHoleScores(round.id, hole.n);
       const draft: Record<string, number> = {};
       group.players.forEach((name:string)=>{ draft[name] = saved[name]!=null ? saved[name] : hole.par; });
       state.scoreDraft = draft;
       state.scoreDraftInitial = {...draft};
       state.scoreDraftContext = { roundId: round.id, groupId: group.id, hole: hole.n };
+      state.scoreConflictWarning = false; // fresh hole/context — any prior warning no longer applies
+    }
+
+    // "Already scored" indicator — reflects what's actually SAVED for this
+    // hole (never the draft), so two people don't unknowingly race to
+    // submit the same hole without realizing someone already has.
+    const savedCount = group.players.filter((name:string)=>saved[name]!=null).length;
+    const totalPlayers = group.players.length;
+    let holeStatusBarClass = '';
+    let holeStatusLabel = '';
+    let holeStatusLabelClass = '';
+    if(savedCount>0 && savedCount===totalPlayers){
+      holeStatusBarClass = 'hole-scored-full';
+      holeStatusLabel = '✓ Already scored';
+      holeStatusLabelClass = 'full';
+    } else if(savedCount>0){
+      holeStatusBarClass = 'hole-scored-partial';
+      holeStatusLabel = `${savedCount}/${totalPlayers} scored`;
+      holeStatusLabelClass = 'partial';
     }
 
     const low = Math.max(1, hole.par-3);
@@ -1300,11 +1340,18 @@ function initApp() {
           <span></span>
         </div>
         ${!editable ? `<div style="font-size:11px;color:var(--navy);background:var(--navy-light);border-radius:8px;padding:4px 8px;margin-bottom:6px;text-align:center;flex:0 0 auto;">Viewing ${esc(group.teeTime)} — sign in to edit</div>` : ''}
-        <div class="scoretopbar">
+        <div class="scoretopbar ${holeStatusBarClass}">
           <button class="navbtn" data-action="prev-hole" ${hole.n<=1?'disabled':''}>‹</button>
-          <div class="holeinfo"><b>⛳ Hole ${hole.n}</b><br/>Par ${hole.par} · ${hole.yds} yds</div>
+          <div class="holeinfo">
+            <b>⛳ Hole ${hole.n}</b><br/>Par ${hole.par} · ${hole.yds} yds
+            ${holeStatusLabel? `<div class="hole-status-label ${holeStatusLabelClass}">${holeStatusLabel}</div>` : ''}
+          </div>
           <button class="navbtn" data-action="next-hole" ${hole.n>=18?'disabled':''}>›</button>
         </div>
+        ${state.scoreConflictWarning? `
+        <div style="flex:0 0 auto;background:var(--danger-bg);border:1px solid var(--danger-text);border-radius:10px;padding:8px 10px;margin-bottom:8px;font-size:12px;color:var(--danger-text);font-weight:600;text-align:center;">
+          ⚠️ Someone just submitted this hole — refresh before continuing to avoid overwriting their entry.
+        </div>` : ''}
         ${matchBannerHtml}
         <div class="playersarea">
           ${group.players.map((name:string)=>{

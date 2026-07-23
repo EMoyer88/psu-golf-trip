@@ -91,6 +91,14 @@ table.sc td.name{text-align:left;font-weight:700;background:#fff;color:var(--tex
 .scoretopbar .navbtn{flex:0 0 auto;width:46px;height:46px;border-radius:10px;border:1px solid var(--border);background:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;cursor:pointer;}
 .scoretopbar .holeinfo{flex:1;text-align:center;font-size:16px;}
 .scoretopbar .holeinfo b{font-size:21px;}
+/* "Already scored" awareness — every player already has a saved score for
+   this hole (full) vs some but not all (partial). Purely informational,
+   doesn't block anything — see renderScoreEntryFullScreen(). */
+.scoretopbar.hole-scored-full{background:#FCEFD9;border-color:var(--gold);}
+.scoretopbar.hole-scored-partial{background:#FDF8EC;border-color:#E9D9A0;}
+.hole-status-label{display:inline-block;margin-top:4px;font-size:10px;font-weight:700;padding:2px 9px;border-radius:10px;}
+.hole-status-label.full{background:var(--gold);color:#fff;}
+.hole-status-label.partial{background:#F0E1B0;color:#8A5A10;}
 .playersarea{flex:1 1 auto;display:flex;flex-direction:column;gap:12px;min-height:0;justify-content:stretch;}
 .playerrow-compact{background:#fff;border:1px solid var(--border);border-radius:16px;padding:10px 14px;display:flex;align-items:center;gap:10px;flex:1 1 0;min-height:72px;}
 .playerrow-compact .pcol{flex:0 0 auto;width:76px;min-width:0;display:flex;flex-direction:column;align-items:center;gap:2px;text-align:center;}
