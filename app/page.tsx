@@ -66,6 +66,13 @@ function initApp() {
     activeRoundId: autoRoundId(),
     activeGroupId: null,
     activeHole: 1,
+    // Local-only draft for the currently-shown hole in the normal Score
+    // tab — tapping a number only ever mutates this, never Supabase. Only
+    // committed (written + logged) on an explicit Submit. See
+    // commitHoleScores()/isScoreDraftDirty().
+    scoreDraft: {},
+    scoreDraftInitial: {},
+    scoreDraftContext: null,
     beaverPanelOpen:false,
     mulliganPanelOpen:false,
     scorecardModalOpen:false,
@@ -79,6 +86,12 @@ function initApp() {
     adminRoundId: null,
     adminGroupId: null,
     adminHole: 1,
+    // Same local-draft-until-explicit-save treatment as scoreDraft above,
+    // for the admin cross-group scoring view.
+    adminScoreDraft: {},
+    adminScoreDraftInitial: {},
+    adminScoreDraftContext: null,
+    adminScoreDraftSavedMsg: '',
     adminExpenseEditingId: null,
     adminMulliganRoundId: null,
     printRoundId: null,
@@ -133,6 +146,34 @@ function initApp() {
     if(state.adminView==='roster' && isRosterDraftDirty()){
       if(!confirm('You have unsaved roster/tee-time changes. Leave without saving?')) return false;
       state.configDraft = null;
+    }
+    return true;
+  }
+  // ---- score-entry draft (explicit Submit/Save, not live-on-every-tap) ----
+  // Dirty means "differs from what the draft looked like when it was first
+  // loaded for this hole" — NOT "differs from what's saved" — so simply
+  // opening a hole and seeing par pre-selected for everyone never counts as
+  // a change (per spec) and never triggers a leave-without-saving warning;
+  // only an actual tap does.
+  function isScoreDraftDirty(){
+    if(!state.scoreDraftContext) return false;
+    return Object.keys(state.scoreDraft).some(p=>state.scoreDraft[p]!==state.scoreDraftInitial[p]);
+  }
+  function confirmLeaveScoreDraft(){
+    if(state.tab==='score' && isScoreDraftDirty()){
+      if(!confirm("You haven't submitted this hole's scores yet. Leave without submitting?")) return false;
+      state.scoreDraftContext = null;
+    }
+    return true;
+  }
+  function isAdminScoreDraftDirty(){
+    if(!state.adminScoreDraftContext) return false;
+    return Object.keys(state.adminScoreDraft).some(p=>state.adminScoreDraft[p]!==state.adminScoreDraftInitial[p]);
+  }
+  function confirmLeaveAdminScoreDraft(){
+    if(state.adminView==='scoring' && isAdminScoreDraftDirty()){
+      if(!confirm("You haven't saved this hole's scores yet. Leave without saving?")) return false;
+      state.adminScoreDraftContext = null;
     }
     return true;
   }
@@ -347,38 +388,61 @@ function initApp() {
   // value per kv_store row) — never a scoped per-field update. That means
   // if this client's in-memory state.scores is stale relative to the
   // server (e.g. it missed an external reset like a Danger Zone clear or a
-  // manual DB edit while its tab was open), saving ANY new tap would
+  // manual DB edit while its tab was open), saving ANY new write would
   // silently resurrect old, unrelated holes/players it still has cached —
   // a real bug previously seen as a "phantom" score reappearing after a
   // clear, written straight to the DB with no corresponding audit-log
   // entry (only the one field the user actually changed gets logged).
   // Fix: always re-fetch the current server copy immediately before
-  // merging in the one intended change, so a stale client can never push
-  // back more than what it explicitly just changed.
-  async function setScore(roundId:string, hole:number, player:string, val:number, isAdminOverride?:boolean){
+  // merging in the intended changes, so a stale client can never push
+  // back more than what it explicitly just committed.
+  //
+  // The ONLY code path that writes to the scores table for tap-to-select
+  // entry (both the player-facing and admin scoring screens) — tapping a
+  // number only ever mutates local draft state (scoreDraft/adminScoreDraft
+  // below) and never touches Supabase or the audit log by itself. This
+  // fires once, on an explicit Submit/Save action, committing every
+  // player's current draft value for that hole in one batch. Only a
+  // player whose committed value actually differs from what was already
+  // saved gets written + a matching audit-log entry — an untouched player
+  // whose draft already matches what's saved produces neither.
+  // Pure — no I/O — so the "skip if unchanged" comparison itself can be
+  // tested independent of the network fetch around it. Compares each
+  // staged value against the CURRENT (server-fresh) hole scores and
+  // returns only the entries that genuinely differ, plus the updated
+  // hole-scores object with those changes applied.
+  function computeHoleScoreChanges(currentHoleScores: Record<string, number>, playerVals: Record<string, number>){
+    const updated = {...currentHoleScores};
+    const changes: {player:string, prevVal:number|null, newVal:number}[] = [];
+    Object.keys(playerVals).forEach(player=>{
+      const val = playerVals[player];
+      const prevVal = updated[player]!=null ? updated[player] : null;
+      if(prevVal===val) return; // nothing changed for this player — no write, no log
+      updated[player] = val;
+      changes.push({player, prevVal, newVal:val});
+    });
+    return { updated, changes };
+  }
+  async function commitHoleScores(roundId:string, hole:number, playerVals: Record<string, number>, isAdminOverride:boolean){
     const k = scoreKey(roundId,hole);
-    // Optimistic local update so the tap feels instant.
-    if(!state.scores[k]) state.scores[k] = {};
-    state.scores[k][player] = val;
-    render();
     const fresh = (await kvGet('scores')) || {};
-    if(!fresh[k]) fresh[k] = {};
-    const prevVal = fresh[k][player]!=null ? fresh[k][player] : null;
-    fresh[k][player] = val;
+    const { updated, changes } = computeHoleScoreChanges(fresh[k] || {}, playerVals);
+    fresh[k] = updated;
+    changes.forEach(c=>logScoreChange(roundId, hole, c.player, c.prevVal, c.newVal, isAdminOverride));
     state.scores = fresh;
-    saveScores();
-    logScoreChange(roundId, hole, player, prevVal, val, !!isAdminOverride);
-    // Tied directly to this one score-entry action (covers both the normal
-    // and admin scoring paths, since both call setScore) — never on
-    // render, so editing/correcting a score can't spam the feed by itself.
-    checkBirdieEagleAutoPost(roundId, hole, player, val);
-    checkMatchMilestoneAutoPosts(roundId);
+    if(changes.length){
+      saveScores();
+      changes.forEach(c=>checkBirdieEagleAutoPost(roundId, hole, c.player, c.newVal));
+      checkMatchMilestoneAutoPosts(roundId);
+    }
     render();
   }
   // Admin-only: fully clear a hole's score back to its normal unentered
   // state (not a placeholder "0") — for correcting a bad entry, not just
-  // overwriting it with another number. Same fresh-fetch-before-write
-  // treatment as setScore(), for the same reason.
+  // overwriting it with another number. Acts immediately on whatever is
+  // currently SAVED (its own explicit confirm() already gates it, unlike
+  // the draft-then-Submit flow above) — same fresh-fetch-before-write
+  // treatment as commitHoleScores(), for the same reason.
   async function eraseScore(roundId:string, hole:number, player:string){
     const k = scoreKey(roundId,hole);
     if(state.scores[k]) delete state.scores[k][player];
@@ -1183,12 +1247,24 @@ function initApp() {
     const hole = round.holes.find(h=>h.n===opts.hole) || round.holes[0];
     const editable = canEditGroup(opts.roundId, group.id);
     const beaverHolder = currentBeaverHolder(round.id, group.id, hole.n);
-    const scores = getHoleScores(round.id, hole.n);
     const holeIdx = hole.n-1;
     const isFri = round.id==='fri';
 
-    let scoresInit: any = {...scores};
-    group.players.forEach((name:string)=>{ if(scoresInit[name]==null) scoresInit[name]=hole.par; });
+    // Lazily (re)initialize the local draft whenever this is a genuinely
+    // different hole/group/round than the one currently drafted — taps
+    // mutate state.scoreDraft directly and must survive re-renders (e.g.
+    // an unrelated realtime update landing while this hole is open)
+    // without being clobbered back to the saved/par defaults here.
+    const ctx = state.scoreDraftContext;
+    const isNewHoleContext = !ctx || ctx.roundId!==round.id || ctx.groupId!==group.id || ctx.hole!==hole.n;
+    if(isNewHoleContext){
+      const saved = getHoleScores(round.id, hole.n);
+      const draft: Record<string, number> = {};
+      group.players.forEach((name:string)=>{ draft[name] = saved[name]!=null ? saved[name] : hole.par; });
+      state.scoreDraft = draft;
+      state.scoreDraftInitial = {...draft};
+      state.scoreDraftContext = { roundId: round.id, groupId: group.id, hole: hole.n };
+    }
 
     const low = Math.max(1, hole.par-3);
     const high = Math.min(10, hole.par+4);
@@ -1233,7 +1309,7 @@ function initApp() {
         <div class="playersarea">
           ${group.players.map((name:string)=>{
             const p = findPlayerObj(name);
-            const val = scoresInit[name];
+            const val = state.scoreDraft[name];
             const diff = val - hole.par;
             let teamLabel = '';
             let strokes = 0;
@@ -1270,7 +1346,7 @@ function initApp() {
         <div class="bottomtoolbar">
           <button class="toolbarbtn" data-action="toggle-mulligan-panel">🍺 Mullies${totalMulligans>0?`<span class="badge-count">${totalMulligans}</span>`:''}</button>
           <button class="toolbarbtn" data-action="open-scorecard-modal">Scorecard</button>
-          <button class="toolbarbtn primary" data-action="submit-hole" ${editable?'':'disabled'}>Submit</button>
+          <button class="toolbarbtn primary" data-action="submit-hole" ${editable?'':'disabled'}>Submit hole ${hole.n}</button>
         </div>
       </div>
       ${state.beaverPanelOpen ? renderBeaverModal(round, group, hole, editable, beaverHolder) : ''}
@@ -2003,11 +2079,29 @@ function initApp() {
     const groupId = (state.adminGroupId && groups.find(g=>g.id===state.adminGroupId)) ? state.adminGroupId : (groups[0]?groups[0].id:null);
     const group = groupId ? groupInRound(roundId, groupId) : null;
     const hole = round.holes.find(h=>h.n===state.adminHole) || round.holes[0];
-    const scores = group ? getHoleScores(roundId, hole.n) : {};
+    const saved = group ? getHoleScores(roundId, hole.n) : {};
+
+    // Same lazy per-hole draft pattern as the normal scoring screen — taps
+    // only stage a value here, nothing is written until Save. Unlike the
+    // player-facing screen, admin has no par pre-select convenience: an
+    // untouched player stays unset (null) exactly as before.
+    if(group){
+      const ctx = state.adminScoreDraftContext;
+      const isNewHoleContext = !ctx || ctx.roundId!==roundId || ctx.groupId!==group.id || ctx.hole!==hole.n;
+      if(isNewHoleContext){
+        const draft: Record<string, number|null> = {};
+        group.players.forEach((name:string)=>{ draft[name] = saved[name]!=null ? saved[name] : null; });
+        state.adminScoreDraft = draft as any;
+        state.adminScoreDraftInitial = {...draft} as any;
+        state.adminScoreDraftContext = { roundId, groupId: group.id, hole: hole.n };
+      }
+    }
+    const dirty = isAdminScoreDraftDirty();
+
     return `
       <div class="card">
         <h3>Edit any group's scores</h3>
-        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">This bypasses the "only your own group" rule — for fixing mistakes.</div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px;">This bypasses the "only your own group" rule — for fixing mistakes. Taps only stage a change — nothing saves until you press Save.</div>
         <label class="field">Round</label>
         <select data-action="admin-pick-round">${ROUNDS.map(r=>`<option value="${r.id}" ${r.id===roundId?'selected':''}>${r.label}</option>`).join('')}</select>
         <label class="field">Group</label>
@@ -2021,7 +2115,8 @@ function initApp() {
         </div>
         ${group.players.map((name:string)=>{
           const p = findPlayerObj(name);
-          const val = scores[name];
+          const val = state.adminScoreDraft[name];
+          const savedVal = saved[name];
           const low = Math.max(1, hole.par-3), high = Math.min(10,hole.par+4);
           let optsN:number[]=[]; for(let i=low;i<=high;i++) optsN.push(i); if(!optsN.includes(1)) optsN.unshift(1);
           return `
@@ -2031,9 +2126,13 @@ function initApp() {
             <div class="scorestrip" style="flex:1;">
               ${optsN.map(n=>`<button class="scorebtn-sm ${n===val?'selected':''}" data-action="admin-set-score" data-player="${esc(name)}" data-val="${n}">${n}</button>`).join('')}
             </div>
-            <button class="btn small" data-action="admin-erase-score" data-player="${esc(name)}" ${val==null?'disabled':''}>✕ Clear</button>
+            <button class="btn small" data-action="admin-erase-score" data-player="${esc(name)}" ${savedVal==null?'disabled':''}>✕ Clear</button>
           </div>`;
         }).join('')}
+        <div style="display:flex;align-items:center;gap:10px;margin-top:6px;">
+          <button class="btn primary" data-action="admin-save-hole" ${dirty?'':'disabled'}>💾 Save hole ${hole.n}</button>
+          ${state.adminScoreDraftSavedMsg? `<span style="font-size:12px;color:var(--success-text);font-weight:600;">${esc(state.adminScoreDraftSavedMsg)}</span>` : (dirty? `<span style="font-size:12px;color:var(--text-secondary);">Unsaved changes</span>` : '')}
+        </div>
         `}
       </div>
     `;
@@ -2607,7 +2706,7 @@ function initApp() {
     document.querySelectorAll('[data-tab]').forEach((el:any)=>{
       el.onclick = ()=>{
         const nextTab = el.dataset.tab;
-        if(nextTab!==state.tab && !confirmLeaveRoster()) return;
+        if(nextTab!==state.tab && (!confirmLeaveRoster() || !confirmLeaveScoreDraft() || !confirmLeaveAdminScoreDraft())) return;
         state.tab = nextTab;
         if(state.tab==='score' && !groupInRound(state.activeRoundId, state.activeGroupId)){
           state.activeGroupId = defaultGroupIdForRound(state.activeRoundId);
@@ -2708,11 +2807,15 @@ function initApp() {
         }
       }; }
       if(action==='pick-round'){ el.onchange=()=>{
+        if(!confirmLeaveScoreDraft()){ render(); return; }
         state.activeRoundId=el.value; state.activeHole=1;
         state.activeGroupId = defaultGroupIdForRound(state.activeRoundId);
         state.pickerModalOpen=false; render();
       }; }
-      if(action==='pick-group'){ el.onchange=()=>{ state.activeGroupId=el.value; state.pickerModalOpen=false; render(); }; }
+      if(action==='pick-group'){ el.onchange=()=>{
+        if(!confirmLeaveScoreDraft()){ render(); return; }
+        state.activeGroupId=el.value; state.pickerModalOpen=false; render();
+      }; }
       if(action==='open-picker-modal'){ el.onclick=()=>{ state.pickerModalOpen=true; render(); }; }
       if(action==='open-scorecard-modal'){ el.onclick=()=>{ state.scorecardModalOpen=!state.scorecardModalOpen; render(); }; }
       if(action==='close-modals'){ el.onclick=()=>{
@@ -2721,7 +2824,8 @@ function initApp() {
         render();
       }; }
       if(action==='set-score'){ el.onclick=()=>{
-        setScore(state.activeRoundId, state.activeHole, el.dataset.player, parseInt(el.dataset.val,10));
+        // Draft-only — no write, no audit-log entry, until Submit.
+        state.scoreDraft[el.dataset.player] = parseInt(el.dataset.val,10);
         render();
       }; }
       if(action==='toggle-beaver-panel'){ el.onclick=()=>{ state.beaverPanelOpen=!state.beaverPanelOpen; render(); }; }
@@ -2741,12 +2845,22 @@ function initApp() {
         render();
         openMulliganCaptureFlow(el.dataset.player, el.dataset.round);
       }; }
-      if(action==='submit-hole'){ el.onclick=()=>{
+      if(action==='submit-hole'){ el.onclick=async ()=>{
+        const roundId = state.activeRoundId, hole = state.activeHole;
+        const draftCopy = {...state.scoreDraft};
+        state.scoreDraftContext = null; // this hole is now considered saved — force a fresh init if revisited
+        await commitHoleScores(roundId, hole, draftCopy, false);
         if(state.activeHole<18){ state.activeHole++; }
         render();
       }; }
-      if(action==='prev-hole'){ el.onclick=()=>{ if(state.activeHole>1) state.activeHole--; render(); }; }
-      if(action==='next-hole'){ el.onclick=()=>{ if(state.activeHole<18) state.activeHole++; render(); }; }
+      if(action==='prev-hole'){ el.onclick=()=>{
+        if(!confirmLeaveScoreDraft()) return;
+        if(state.activeHole>1) state.activeHole--; render();
+      }; }
+      if(action==='next-hole'){ el.onclick=()=>{
+        if(!confirmLeaveScoreDraft()) return;
+        if(state.activeHole<18) state.activeHole++; render();
+      }; }
       if(action==='pick-board-round'){ el.onclick=()=>{ state.boardRoundId=el.dataset.round; render(); }; }
       if(action==='toggle-board-expand'){ el.onclick=()=>{ state.boardExpanded[el.dataset.key]=!state.boardExpanded[el.dataset.key]; render(); }; }
       if(action==='open-net-scorecard-modal'){ el.onclick=()=>{ state.boardNetScorecardOpen=true; render(); }; }
@@ -2924,18 +3038,28 @@ function initApp() {
       // ---- Admin ----
       if(action==='admin-nav'){ el.onclick=()=>{
         const nextView = el.dataset.view;
-        if(nextView!==state.adminView && !confirmLeaveRoster()) return;
+        if(nextView!==state.adminView && (!confirmLeaveRoster() || !confirmLeaveAdminScoreDraft())) return;
         state.adminView=nextView; render();
       }; }
       if(action==='admin-pick-round'){ el.onchange=()=>{
+        if(!confirmLeaveAdminScoreDraft()){ render(); return; }
         state.adminRoundId=el.value; state.adminHole=1;
         const gs = groupsForRound(state.adminRoundId);
         state.adminGroupId = gs.length? gs[0].id : null;
         render();
       }; }
-      if(action==='admin-pick-group'){ el.onchange=()=>{ state.adminGroupId=el.value; render(); }; }
-      if(action==='admin-hole-prev'){ el.onclick=()=>{ if(state.adminHole>1) state.adminHole--; render(); }; }
-      if(action==='admin-hole-next'){ el.onclick=()=>{ if(state.adminHole<18) state.adminHole++; render(); }; }
+      if(action==='admin-pick-group'){ el.onchange=()=>{
+        if(!confirmLeaveAdminScoreDraft()){ render(); return; }
+        state.adminGroupId=el.value; render();
+      }; }
+      if(action==='admin-hole-prev'){ el.onclick=()=>{
+        if(!confirmLeaveAdminScoreDraft()) return;
+        if(state.adminHole>1) state.adminHole--; render();
+      }; }
+      if(action==='admin-hole-next'){ el.onclick=()=>{
+        if(!confirmLeaveAdminScoreDraft()) return;
+        if(state.adminHole<18) state.adminHole++; render();
+      }; }
       if(action==='admin-mulligan-pick-round'){ el.onchange=()=>{ state.adminMulliganRoundId=el.value; render(); }; }
       if(action==='admin-set-mulligan'){ el.onchange=()=>{
         const v = Math.max(0, parseInt(el.value,10)||0);
@@ -2946,14 +3070,32 @@ function initApp() {
         render();
       }; }
       if(action==='admin-set-score'){ el.onclick=()=>{
-        const roundId = state.adminRoundId || autoRoundId();
-        setScore(roundId, state.adminHole, el.dataset.player, parseInt(el.dataset.val,10), true);
+        // Draft-only — no write, no audit-log entry, until Save.
+        state.adminScoreDraft[el.dataset.player] = parseInt(el.dataset.val,10);
         render();
       }; }
-      if(action==='admin-erase-score'){ el.onclick=()=>{
+      if(action==='admin-save-hole'){ el.onclick=async ()=>{
         const roundId = state.adminRoundId || autoRoundId();
-        if(!confirm(`Erase ${el.dataset.player}'s score for hole ${state.adminHole}? This can't be undone.`)) return;
-        eraseScore(roundId, state.adminHole, el.dataset.player);
+        const hole = state.adminHole;
+        const draftCopy: Record<string, number> = {};
+        Object.keys(state.adminScoreDraft).forEach(p=>{ if(state.adminScoreDraft[p]!=null) draftCopy[p] = state.adminScoreDraft[p]; });
+        state.adminScoreDraftContext = null; // this hole is now considered saved — force a fresh init if revisited
+        await commitHoleScores(roundId, hole, draftCopy, true);
+        state.adminScoreDraftSavedMsg = 'Saved!';
+        render();
+        setTimeout(()=>{ state.adminScoreDraftSavedMsg=''; render(); }, 2500);
+      }; }
+      if(action==='admin-erase-score'){ el.onclick=async ()=>{
+        const roundId = state.adminRoundId || autoRoundId();
+        const player = el.dataset.player;
+        if(!confirm(`Erase ${player}'s score for hole ${state.adminHole}? This can't be undone.`)) return;
+        await eraseScore(roundId, state.adminHole, player);
+        // Keep the draft in sync with the erase — otherwise a stale draft
+        // value could silently resurrect the just-erased score on Save.
+        if(state.adminScoreDraftContext){
+          state.adminScoreDraft[player] = null;
+          state.adminScoreDraftInitial[player] = null;
+        }
         render();
       }; }
       if(action==='audit-filter-round'){ el.onchange=()=>{ state.auditFilterRound = el.value; render(); }; }
@@ -3107,7 +3249,11 @@ function initApp() {
   window.addEventListener('touchend', ()=>{ ptrStartY = null; }, {passive:true});
 
   window.addEventListener('beforeunload', (e:any)=>{
-    if(state.adminView==='roster' && isRosterDraftDirty()){
+    if(
+      (state.adminView==='roster' && isRosterDraftDirty()) ||
+      isScoreDraftDirty() ||
+      isAdminScoreDraftDirty()
+    ){
       e.preventDefault(); e.returnValue='';
     }
   });
