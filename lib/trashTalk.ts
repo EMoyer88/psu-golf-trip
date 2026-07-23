@@ -138,13 +138,18 @@ export const AUTO_POST_CONFIG = {
     matchClinched: true,
     bigLeadMilestone: true,
     lunchCallout: true,
+    blowupHole: true,
   },
   // Lead (in holes) a team must reach for the "pulling away" milestone —
   // fires once per match, the first time a lead reaches this size.
   bigLeadThreshold: 3,
+  // A hole score this many-or-more strokes over par counts as a "blow up"
+  // (a quad bogey is exactly +4) — see checkBirdieEagleAutoPost().
+  blowupThreshold: 4,
   templates: {
     birdie: (player: string, hole: number) => `🐦 ${player} birdies hole ${hole}!`,
     eagle: (player: string, hole: number) => `🦅 ${player} EAGLE on hole ${hole}!!`,
+    blowupHole: (player: string, hole: number, overPar: number) => `💥 ${player} implodes on hole ${hole} (+${overPar}).`,
     matchClinched: (winningTeam: string, losingTeam: string, margin: number, holesRemaining: number) =>
       holesRemaining > 0
         ? `🏆 ${winningTeam} close it out, ${margin} and ${holesRemaining} over ${losingTeam}.`

@@ -62,6 +62,11 @@ function initApp() {
     lunchOrders: {},
     lunchOrderDraft: null,
     lunchOrderSavedMsg: '',
+    // Admin-authored quad-bogey-or-worse insult lines, per player — a
+    // separate, admin-editable pool, entirely independent of the built-in
+    // PLAYER_LINES joke bank in lib/trashTalk.ts. Ships empty by default.
+    customQuadBogeyLines: {},
+    adminInsultPlayer: null,
     loaded:false,
     activeRoundId: autoRoundId(),
     activeGroupId: null,
@@ -117,6 +122,7 @@ function initApp() {
     const apf = await kvGet('auto-post-flags'); if(apf) state.autoPostFlags = apf;
     const sal = await kvGet('score-audit-log'); if(sal) state.scoreAuditLog = sal;
     const lo = await kvGet('lunch-orders'); if(lo) state.lunchOrders = lo;
+    const cql = await kvGet('custom-quad-bogey-lines'); if(cql) state.customQuadBogeyLines = cql;
 
     try{ state.myEmail = localStorage.getItem('golf-my-email') || null; }catch(e){ state.myEmail = null; }
     recomputeSession();
@@ -156,10 +162,12 @@ function initApp() {
     kvSubscribe('auto-post-flags', (v)=>{ state.autoPostFlags = v; });
     kvSubscribe('score-audit-log', (v)=>{ state.scoreAuditLog = v; render(); });
     kvSubscribe('lunch-orders', (v)=>{ state.lunchOrders = v; render(); });
+    kvSubscribe('custom-quad-bogey-lines', (v)=>{ state.customQuadBogeyLines = v; render(); });
     kvSubscribe('trip-config', (v)=>{ state.config = v; recomputeSession(); render(); });
   }
 
   function saveConfig(){ kvSet('trip-config', state.config); }
+  function saveCustomQuadBogeyLines(){ kvSet('custom-quad-bogey-lines', state.customQuadBogeyLines); }
   // ---- roster/tee-time admin draft (explicit Save, not live-on-every-change) ----
   function isRosterDraftDirty(){
     return !!state.configDraft && JSON.stringify(state.configDraft) !== JSON.stringify(state.config);
@@ -532,24 +540,42 @@ function initApp() {
   // key. Re-saving the same value is a no-op (type unchanged). Editing away
   // from a birdie/eagle clears the flag without posting. Editing INTO one —
   // whether fresh or a correction — posts, since the stored type changed.
+  // Admin-authored custom quad-bogey-or-worse lines for one player — a
+  // separate, admin-editable pool (state.customQuadBogeyLines), entirely
+  // independent of lib/trashTalk.ts's built-in PLAYER_LINES joke bank.
+  // Ships empty by default; only ever populated via the Admin tool.
+  function pickCustomQuadBogeyLine(player:string): string | null {
+    const lines = state.customQuadBogeyLines[player];
+    if(!lines || !lines.length) return null;
+    return lines[Math.floor(Math.random()*lines.length)];
+  }
   function checkBirdieEagleAutoPost(roundId:string, hole:number, player:string, val:number){
     if(roundId==='fri') return; // Saturday only in this batch
     const round = roundOf(roundId);
     const h = round.holes.find(hh=>hh.n===hole);
     if(!h) return;
     const diff = val - h.par;
-    const newType: 'eagle'|'birdie'|null = diff<=-2 ? 'eagle' : diff===-1 ? 'birdie' : null;
+    const newType: 'eagle'|'birdie'|'blowupHole'|null =
+      diff<=-2 ? 'eagle' : diff===-1 ? 'birdie' : diff>=AUTO_POST_CONFIG.blowupThreshold ? 'blowupHole' : null;
     const key = `${roundId}-h${hole}-${player}`;
     const prevType = state.autoPostFlags[key] || null;
     if(newType===prevType) return;
     state.autoPostFlags[key] = newType;
     saveAutoPostFlags();
     if(newType && (AUTO_POST_CONFIG.enabled as any)[newType]){
-      const line = pickPlayerLine(player);
-      const base = newType==='eagle'
-        ? AUTO_POST_CONFIG.templates.eagle(player, hole)
-        : AUTO_POST_CONFIG.templates.birdie(player, hole);
-      pushAutoPost(line ? `${base} ${line}` : base);
+      if(newType==='blowupHole'){
+        // A player's own admin-entered custom line takes priority over the
+        // generic joke bank — falls back to it only if they have none.
+        const line = pickCustomQuadBogeyLine(player) || pickPlayerLine(player);
+        const base = AUTO_POST_CONFIG.templates.blowupHole(player, hole, diff);
+        pushAutoPost(line ? `${base} ${line}` : base);
+      } else {
+        const line = pickPlayerLine(player);
+        const base = newType==='eagle'
+          ? AUTO_POST_CONFIG.templates.eagle(player, hole)
+          : AUTO_POST_CONFIG.templates.birdie(player, hole);
+        pushAutoPost(line ? `${base} ${line}` : base);
+      }
     }
   }
   function toParFor(roundId:string, player:string){
@@ -2112,6 +2138,7 @@ function initApp() {
         <span class="chip ${view==='roster'?'':'off'}" data-action="admin-nav" data-view="roster">Roster &amp; groups</span>
         <span class="chip ${view==='lunch'?'':'off'}" data-action="admin-nav" data-view="lunch">Lunch orders</span>
         <span class="chip ${view==='audit'?'':'off'}" data-action="admin-nav" data-view="audit">Score audit log</span>
+        <span class="chip ${view==='insults'?'':'off'}" data-action="admin-nav" data-view="insults">Quad Bogey Insults</span>
         <span class="chip ${view==='danger'?'':'off'}" data-action="admin-nav" data-view="danger">Danger zone</span>
       </div>
       ${view==='scoring'?renderAdminScoring()
@@ -2121,7 +2148,40 @@ function initApp() {
         : view==='roster'?renderRosterEditor()
         : view==='lunch'?renderAdminLunchOrders()
         : view==='audit'?renderAdminAuditLog()
+        : view==='insults'?renderAdminQuadBogeyLines()
         : renderAdminDanger()}
+    `;
+  }
+
+  function renderAdminQuadBogeyLines(){
+    const roster = allPlayerNames();
+    const selected = (state.adminInsultPlayer && roster.includes(state.adminInsultPlayer)) ? state.adminInsultPlayer : (roster[0]||null);
+    const lines: string[] = selected ? (state.customQuadBogeyLines[selected]||[]) : [];
+    return `
+      <div class="card">
+        <h3>💥 Quad Bogey Insults</h3>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">
+          Custom lines for a specific player's own quad-bogey-or-worse (4+ over par) holes — a separate pool from the built-in joke bank, entirely admin-written. Empty by default; a player's line here is used instead of the generic one when they blow up a hole.
+        </div>
+        ${!selected ? '<div class="empty">Add players to the roster first.</div>' : `
+        <label class="field">Player</label>
+        <select data-action="admin-pick-insult-player">${roster.map(n=>`<option value="${esc(n)}" ${n===selected?'selected':''}>${esc(n)}</option>`).join('')}</select>
+        <div style="margin:10px 0;">
+          ${lines.length===0 ? `<div class="empty" style="padding:10px 4px;">No custom lines yet for ${esc(selected)}.</div>` :
+            lines.map((line,idx)=>`
+            <div class="row" style="padding:6px 0;border-bottom:1px solid var(--border);align-items:flex-start;">
+              <span style="font-size:13px;flex:1;padding-right:8px;">${esc(line)}</span>
+              <button class="btn small" data-action="admin-remove-insult-line" data-idx="${idx}">✕</button>
+            </div>
+          `).join('')}
+        </div>
+        <label class="field">Add a new line for ${esc(selected)}</label>
+        <div style="display:flex;gap:8px;">
+          <input type="text" id="admin-insult-new-line" placeholder="Custom quad-bogey line…"/>
+          <button class="btn primary small" data-action="admin-add-insult-line">Add</button>
+        </div>
+        `}
+      </div>
     `;
   }
 
@@ -3185,6 +3245,27 @@ function initApp() {
       }; }
       if(action==='audit-filter-round'){ el.onchange=()=>{ state.auditFilterRound = el.value; render(); }; }
       if(action==='audit-filter-player'){ el.onchange=()=>{ state.auditFilterPlayer = el.value; render(); }; }
+      if(action==='admin-pick-insult-player'){ el.onchange=()=>{ state.adminInsultPlayer = el.value; render(); }; }
+      if(action==='admin-add-insult-line'){ el.onclick=()=>{
+        const input = document.getElementById('admin-insult-new-line') as HTMLInputElement | null;
+        const text = input ? input.value.trim() : '';
+        if(!text) return;
+        const player = (state.adminInsultPlayer && allPlayerNames().includes(state.adminInsultPlayer)) ? state.adminInsultPlayer : allPlayerNames()[0];
+        if(!player) return;
+        if(!state.customQuadBogeyLines[player]) state.customQuadBogeyLines[player] = [];
+        state.customQuadBogeyLines[player].push(text);
+        saveCustomQuadBogeyLines();
+        if(input) input.value='';
+        render();
+      }; }
+      if(action==='admin-remove-insult-line'){ el.onclick=()=>{
+        const player = (state.adminInsultPlayer && allPlayerNames().includes(state.adminInsultPlayer)) ? state.adminInsultPlayer : allPlayerNames()[0];
+        if(!player || !state.customQuadBogeyLines[player]) return;
+        if(!confirm('Remove this line?')) return;
+        state.customQuadBogeyLines[player].splice(parseInt(el.dataset.idx,10),1);
+        saveCustomQuadBogeyLines();
+        render();
+      }; }
       if(action==='admin-edit-expense'){ el.onclick=()=>{ state.adminExpenseEditingId=parseInt(el.dataset.idx,10); render(); }; }
       if(action==='admin-cancel-edit-expense'){ el.onclick=()=>{ state.adminExpenseEditingId=null; render(); }; }
       if(action==='admin-delete-expense'){ el.onclick=()=>{
