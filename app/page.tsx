@@ -123,6 +123,7 @@ function initApp() {
 
     state.loaded = true;
     state.activeGroupId = defaultGroupIdForRound(state.activeRoundId);
+    state.activeHole = resumeHoleForGroup(state.activeRoundId, state.activeGroupId);
     render();
     subscribeAll();
     checkLunchCalloutAutoPost();
@@ -229,6 +230,23 @@ function initApp() {
     if(sg) return sg;
     const gs = groupsForRound(roundId);
     return gs.length ? gs[0].id : null;
+  }
+  // "Resume where you left off" — based entirely on the real saved score
+  // data for this group (never a locally-remembered last-viewed hole, so
+  // it stays correct across devices, browser clears, or a teammate
+  // scoring while this player was away). Finds this group's
+  // highest-numbered fully-scored hole and returns the one right after
+  // it; hole 1 if nothing's scored yet; 18 if the whole round is done.
+  function resumeHoleForGroup(roundId:string, groupId:string|null): number {
+    const group = groupId ? groupInRound(roundId, groupId) : null;
+    if(!group || !group.players.length) return 1;
+    const round = roundOf(roundId);
+    let highestComplete = 0;
+    round.holes.forEach(h=>{
+      const sc = getHoleScores(roundId, h.n);
+      if(group.players.every((p:string)=>sc[p]!=null)) highestComplete = h.n;
+    });
+    return Math.min(18, highestComplete + 1);
   }
   function canEditGroup(roundId:string, groupId:string, adminOverride?:boolean){
     if(adminOverride) return true;
@@ -2754,9 +2772,17 @@ function initApp() {
       el.onclick = ()=>{
         const nextTab = el.dataset.tab;
         if(nextTab!==state.tab && (!confirmLeaveRoster() || !confirmLeaveScoreDraft() || !confirmLeaveAdminScoreDraft())) return;
+        const enteringScore = state.tab!=='score' && nextTab==='score';
         state.tab = nextTab;
         if(state.tab==='score' && !groupInRound(state.activeRoundId, state.activeGroupId)){
           state.activeGroupId = defaultGroupIdForRound(state.activeRoundId);
+        }
+        // Resume where the group actually left off — recomputed from real
+        // saved scores every time the Score tab is (re)entered, not just
+        // on first load, so it reflects whatever's changed since (a
+        // teammate scoring more holes, a switched device, etc).
+        if(enteringScore){
+          state.activeHole = resumeHoleForGroup(state.activeRoundId, state.activeGroupId);
         }
         render();
       };
@@ -2855,13 +2881,16 @@ function initApp() {
       }; }
       if(action==='pick-round'){ el.onchange=()=>{
         if(!confirmLeaveScoreDraft()){ render(); return; }
-        state.activeRoundId=el.value; state.activeHole=1;
+        state.activeRoundId=el.value;
         state.activeGroupId = defaultGroupIdForRound(state.activeRoundId);
+        state.activeHole = resumeHoleForGroup(state.activeRoundId, state.activeGroupId);
         state.pickerModalOpen=false; render();
       }; }
       if(action==='pick-group'){ el.onchange=()=>{
         if(!confirmLeaveScoreDraft()){ render(); return; }
-        state.activeGroupId=el.value; state.pickerModalOpen=false; render();
+        state.activeGroupId=el.value;
+        state.activeHole = resumeHoleForGroup(state.activeRoundId, state.activeGroupId);
+        state.pickerModalOpen=false; render();
       }; }
       if(action==='open-picker-modal'){ el.onclick=()=>{ state.pickerModalOpen=true; render(); }; }
       if(action==='open-scorecard-modal'){ el.onclick=()=>{ state.scorecardModalOpen=!state.scorecardModalOpen; render(); }; }
