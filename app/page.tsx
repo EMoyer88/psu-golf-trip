@@ -124,18 +124,25 @@ function initApp() {
     const apf = await kvGet('auto-post-flags'); if(apf) state.autoPostFlags = apf;
     const sal = await kvGet('score-audit-log'); if(sal) state.scoreAuditLog = sal;
     const lo = await kvGet('lunch-orders'); if(lo) state.lunchOrders = lo;
+    // Migration: merge in any DEFAULT_CUSTOM_QUAD_BOGEY_LINES player who
+    // isn't already a key in the saved row. The admin insults tool existed
+    // before this migration was written, so the row was often already
+    // saved (e.g. with just manually-added lines) — gating on "row exists
+    // at all" would skip seeding forever. Keying per-player instead means:
+    // a player never touched gets seeded once; a player the admin
+    // deliberately cleared to [] keeps their empty array (the key already
+    // exists, so it's left alone) rather than being silently re-seeded.
     const cql = await kvGet('custom-quad-bogey-lines');
-    if(cql){
-      state.customQuadBogeyLines = cql;
-    } else {
-      // One-time migration: this kv row has never been saved before (as
-      // opposed to existing but empty, e.g. an admin deliberately cleared
-      // everything) — seed it once from the old static joke bank so
-      // nothing already written is lost, then the admin tool is the only
-      // copy that matters from here on.
-      state.customQuadBogeyLines = JSON.parse(JSON.stringify(DEFAULT_CUSTOM_QUAD_BOGEY_LINES));
-      saveCustomQuadBogeyLines();
-    }
+    const merged: Record<string, string[]> = cql ? {...cql} : {};
+    let seededSomething = false;
+    Object.keys(DEFAULT_CUSTOM_QUAD_BOGEY_LINES).forEach(player=>{
+      if(!(player in merged)){
+        merged[player] = [...DEFAULT_CUSTOM_QUAD_BOGEY_LINES[player]];
+        seededSomething = true;
+      }
+    });
+    state.customQuadBogeyLines = merged;
+    if(!cql || seededSomething) saveCustomQuadBogeyLines();
 
     try{ state.myEmail = localStorage.getItem('golf-my-email') || null; }catch(e){ state.myEmail = null; }
     recomputeSession();
