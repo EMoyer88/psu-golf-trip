@@ -119,6 +119,68 @@ export const DEFAULT_CONFIG: TripConfig = {
   rounds: DEFAULT_ROUND_GROUPS,
 };
 
+// One-time seed for the admin-editable "Quad Bogey Insults" tool
+// (state.customQuadBogeyLines in app/page.tsx) — same role as
+// DEFAULT_ROSTER/DEFAULT_ROUND_GROUPS above: a starting point that's
+// fully editable afterward, not an ongoing parallel data source. This
+// used to be a separate hardcoded PLAYER_LINES bank in lib/trashTalk.ts;
+// it's migrated here once, then the admin tool is the only copy that
+// matters going forward.
+export const DEFAULT_CUSTOM_QUAD_BOGEY_LINES: Record<string, string[]> = {
+  Jeff: [
+    "Somewhere, Jeff just said \"ah nuts.\" Statistically likely.",
+    "Hey fella, that swing needs some work.",
+    "Jeff's getting 19 strokes today and still finding ways to need more.",
+  ],
+  Greg: [
+    "Greg's already picking out his Tour card font.",
+    "Careful — Q-School called, they want their scores back.",
+    "Greg treats a Saturday scramble like the back nine at Augusta.",
+  ],
+  Corey: [
+    "Corey's 3-wood is having an off day. RIP Corey's round.",
+    "If the 3-wood's not working, Corey's playing with a putter and a prayer.",
+  ],
+  Dan: [
+    "Dan, the blazer stays in the car, this is a public course.",
+    "Someone tell Dan there's no member's-only grill at the turn here.",
+  ],
+  Ben: [
+    "Ben spent years in scarlet and gray. We forgive. We don't forget.",
+    "Ben would rather be doing donuts in the minivan than three-putting this green.",
+  ],
+  Chilla: [
+    "Chilla was probably at a stranger's apartment playing beer pong at 2am. Swinging fine anyway.",
+    "Reminder: Chilla once lost his glasses and birdied half the back nine. Someone hide his glasses again.",
+  ],
+  Shaun: [
+    "Shaun's out here debugging his swing like a server outage.",
+    "Shaun should stick to what he's good at — pouring a beer, not hitting one.",
+  ],
+  Stein: [
+    "Wait, who invited this guy again?",
+    "New guy Stein, still working on a trip nickname.",
+  ],
+  Ryan: [
+    "Ryan should be running a spreadsheet instead of a scorecard.",
+    "Ryan's from Alabama — we'll allow one Roll Tide-fueled shank per round.",
+  ],
+  Alex: [
+    "Today's not a golf day for you, Alex — maybe more of a vibes guy today, pal.",
+    "Alex, your kids miss you. Also your swing right now.",
+    "3 kids at home and Alex chose this. Bold.",
+    "Some days Alex shows up. Today Alex showed up to vibe.",
+  ],
+  Erik: [
+    "Erik's about to explain his \"strategy\" after a triple bogey.",
+    "Confidence: 10/10. Handicap: also basically 10/10 too high for that confidence.",
+    "Somewhere, Erik is convinced this is the round he \"figures it out.\"",
+    "Erik plays like he's got a scratch handicap and a YouTube swing tutorial. Neither is working today.",
+    "Erik's swing isn't the only rough thing about him.",
+    "That's a bogey and, frankly, a face only a mother could love.",
+  ],
+};
+
 // Standard stroke-index allocation: give a stroke on every hole whose SI is
 // <= the player's effective handicap, a second stroke once the handicap
 // clears 18 + that hole's SI. `handicap` here is already the EFFECTIVE

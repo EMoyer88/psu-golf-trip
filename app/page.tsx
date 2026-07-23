@@ -3,13 +3,12 @@
 import { useEffect, useRef } from 'react';
 import { kvGet, kvSet, kvSubscribe, uploadPhoto, compressImage } from '@/lib/store';
 import {
-  ROUNDS_META, DEFAULT_CONFIG, ADMIN_EMAILS,
+  ROUNDS_META, DEFAULT_CONFIG, ADMIN_EMAILS, DEFAULT_CUSTOM_QUAD_BOGEY_LINES,
   strokesForHole, lowHandicapAmong, initialsFor,
   Player, RoundGroup,
 } from '@/lib/tripData';
 import {
   LEADERBOARD_FLAVOR, EMPTY_STATES, LAST_PLACE_LABEL, MATCH_COMMENTARY, AUTO_POST_CONFIG,
-  pickMatchCommentary, pickPlayerLine,
 } from '@/lib/trashTalk';
 import { LUNCH_MENU, LUNCH_MODIFIERS, LUNCH_ORDER_DEADLINE, LUNCH_READY_TIME_LABEL } from '@/lib/lunchMenu';
 
@@ -62,11 +61,14 @@ function initApp() {
     lunchOrders: {},
     lunchOrderDraft: null,
     lunchOrderSavedMsg: '',
-    // Admin-authored quad-bogey-or-worse insult lines, per player — a
-    // separate, admin-editable pool, entirely independent of the built-in
-    // PLAYER_LINES joke bank in lib/trashTalk.ts. Ships empty by default.
+    // Admin-editable per-player insult/commentary lines — the SINGLE
+    // source for all player-specific content across the whole app (Score
+    // page match commentary, birdie/eagle/blowup feed posts). Seeded once
+    // from lib/tripData.ts's DEFAULT_CUSTOM_QUAD_BOGEY_LINES on first
+    // ever load (see load()), fully admin-editable from then on.
     customQuadBogeyLines: {},
     adminInsultPlayer: null,
+    adminInsultEditingIdx: null,
     loaded:false,
     activeRoundId: autoRoundId(),
     activeGroupId: null,
@@ -122,7 +124,18 @@ function initApp() {
     const apf = await kvGet('auto-post-flags'); if(apf) state.autoPostFlags = apf;
     const sal = await kvGet('score-audit-log'); if(sal) state.scoreAuditLog = sal;
     const lo = await kvGet('lunch-orders'); if(lo) state.lunchOrders = lo;
-    const cql = await kvGet('custom-quad-bogey-lines'); if(cql) state.customQuadBogeyLines = cql;
+    const cql = await kvGet('custom-quad-bogey-lines');
+    if(cql){
+      state.customQuadBogeyLines = cql;
+    } else {
+      // One-time migration: this kv row has never been saved before (as
+      // opposed to existing but empty, e.g. an admin deliberately cleared
+      // everything) — seed it once from the old static joke bank so
+      // nothing already written is lost, then the admin tool is the only
+      // copy that matters from here on.
+      state.customQuadBogeyLines = JSON.parse(JSON.stringify(DEFAULT_CUSTOM_QUAD_BOGEY_LINES));
+      saveCustomQuadBogeyLines();
+    }
 
     try{ state.myEmail = localStorage.getItem('golf-my-email') || null; }catch(e){ state.myEmail = null; }
     recomputeSession();
@@ -530,25 +543,46 @@ function initApp() {
 
   // ---- automatic "⛳ Live Update" feed posts for live scoring events ----
   // Saturday (AM + PM) only, per lib/trashTalk.ts's AUTO_POST_CONFIG.
-  function pushAutoPost(text:string){
+  // `headerText`, when given, renders as its own visually distinct line
+  // above the body text (see renderFeedMessage()) — used by the blowup-hole
+  // post's fixed "BLOWUP HOLE" banner.
+  function pushAutoPost(text:string, headerText?:string){
     const id = Date.now()+'-'+Math.random().toString(36).slice(2,7);
     const time = new Date().toLocaleString([], {month:'short', day:'numeric', hour:'2-digit', minute:'2-digit'});
-    state.chat.push({ id, author: AUTO_POST_CONFIG.authorName, isAuto:true, text, time, reactions:{}, replies:[] });
+    const msg: any = { id, author: AUTO_POST_CONFIG.authorName, isAuto:true, text, time, reactions:{}, replies:[] };
+    if(headerText) msg.headerText = headerText;
+    state.chat.push(msg);
     saveChat();
+  }
+  // The SINGLE source for every player-specific insult/commentary line
+  // anywhere in the app (Score page match commentary, birdie/eagle/
+  // blowup-hole feed posts) — admin-editable via the "Quad Bogey Insults"
+  // tool (state.customQuadBogeyLines), seeded once from
+  // lib/tripData.ts's DEFAULT_CUSTOM_QUAD_BOGEY_LINES. Never appears on
+  // the Leaders page — see renderBoard()'s lastPlaceBadge/leaderRow and
+  // renderTeamGameCard(), which never call this.
+  function pickPlayerInsultLine(player:string): string | null {
+    const lines = state.customQuadBogeyLines[player];
+    if(!lines || !lines.length) return null;
+    return lines[Math.floor(Math.random()*lines.length)];
+  }
+  // Picks one random line from the generic MATCH_COMMENTARY pool for
+  // `category`, blended with any admin-editable insult lines belonging to
+  // `relevantPlayers` — pass [] to get purely generic commentary (used by
+  // the Leaders page, which never shows player-specific content).
+  function pickMatchCommentaryLine(category: keyof typeof MATCH_COMMENTARY, relevantPlayers: string[]): string {
+    const pool: string[] = [...MATCH_COMMENTARY[category]];
+    relevantPlayers.forEach(name=>{
+      const lines = state.customQuadBogeyLines[name];
+      if(lines && lines.length) pool.push(...lines);
+    });
+    if(!pool.length) return '';
+    return pool[Math.floor(Math.random()*pool.length)];
   }
   // Birdie/eagle: tracks the CURRENT event type per (round, hole, player)
   // key. Re-saving the same value is a no-op (type unchanged). Editing away
   // from a birdie/eagle clears the flag without posting. Editing INTO one —
   // whether fresh or a correction — posts, since the stored type changed.
-  // Admin-authored custom quad-bogey-or-worse lines for one player — a
-  // separate, admin-editable pool (state.customQuadBogeyLines), entirely
-  // independent of lib/trashTalk.ts's built-in PLAYER_LINES joke bank.
-  // Ships empty by default; only ever populated via the Admin tool.
-  function pickCustomQuadBogeyLine(player:string): string | null {
-    const lines = state.customQuadBogeyLines[player];
-    if(!lines || !lines.length) return null;
-    return lines[Math.floor(Math.random()*lines.length)];
-  }
   function checkBirdieEagleAutoPost(roundId:string, hole:number, player:string, val:number){
     if(roundId==='fri') return; // Saturday only in this batch
     const round = roundOf(roundId);
@@ -564,13 +598,11 @@ function initApp() {
     saveAutoPostFlags();
     if(newType && (AUTO_POST_CONFIG.enabled as any)[newType]){
       if(newType==='blowupHole'){
-        // A player's own admin-entered custom line takes priority over the
-        // generic joke bank — falls back to it only if they have none.
-        const line = pickCustomQuadBogeyLine(player) || pickPlayerLine(player);
-        const base = AUTO_POST_CONFIG.templates.blowupHole(player, hole, diff);
-        pushAutoPost(line ? `${base} ${line}` : base);
+        const header = AUTO_POST_CONFIG.templates.blowupHoleHeader(hole, diff);
+        const body = pickPlayerInsultLine(player) || AUTO_POST_CONFIG.templates.blowupHoleFallback(player);
+        pushAutoPost(body, header);
       } else {
-        const line = pickPlayerLine(player);
+        const line = pickPlayerInsultLine(player);
         const base = newType==='eagle'
           ? AUTO_POST_CONFIG.templates.eagle(player, hole)
           : AUTO_POST_CONFIG.templates.birdie(player, hole);
@@ -784,7 +816,7 @@ function initApp() {
           const holesRemaining = result.clinchedAtHole!=null ? 18-result.clinchedAtHole : 0;
           const margin = Math.abs(result.diff);
           const base = AUTO_POST_CONFIG.templates.matchClinched(winningTeam, losingTeam, margin, holesRemaining);
-          const line = pickMatchCommentary('clinched', losingPlayers);
+          const line = pickMatchCommentaryLine('clinched', losingPlayers);
           pushAutoPost(line ? `${base} ${line}` : base);
         } else if(!status.clinched && wasClinched){
           state.autoPostFlags[clinchKey] = false; // allow a genuine later re-clinch to post again
@@ -806,7 +838,7 @@ function initApp() {
           const trailingTeam = leaderIsA ? result.b.join(' & ') : result.a.join(' & ');
           const trailingPlayers = leaderIsA ? result.b : result.a;
           const base = AUTO_POST_CONFIG.templates.bigLeadMilestone(leadingTeam, trailingTeam, Math.abs(result.diff));
-          const line = pickMatchCommentary('trailingBig', trailingPlayers);
+          const line = pickMatchCommentaryLine('trailingBig', trailingPlayers);
           pushAutoPost(line ? `${base} ${line}` : base);
         }
       }
@@ -1367,7 +1399,7 @@ function initApp() {
       const matchResult = twoVTwoResults(round.id, group);
       if(matchResult && matchResult.holesPlayed>0){
         const status = matchStatusText(matchResult);
-        const commentary = commentaryFor(matchResult, status);
+        const commentary = commentaryFor(matchResult, status, true);
         const arrow = status.leader==='A' ? '◀ ' : status.leader==='B' ? '▶ ' : '';
         matchBannerHtml = `
           <div style="flex:0 0 auto;text-align:center;background:#fff;border:1px solid var(--border);border-radius:10px;padding:6px 10px;margin-bottom:8px;">
@@ -1576,20 +1608,25 @@ function initApp() {
     if(status.leader===null) return [...result.a, ...result.b];
     return status.leader==='A' ? result.b : result.a; // trailing team
   }
-  function commentaryFor(result:any, status:any){
+  // includePersonalLines: the Score page's inline match banner passes true
+  // (personalized, from the single admin-editable source); the Leaders
+  // page's renderTeamGameCard passes false — Leaders never shows
+  // player-specific content, only the generic MATCH_COMMENTARY pool.
+  function commentaryFor(result:any, status:any, includePersonalLines:boolean){
     if(result.holesPlayed===0) return '';
     let category: keyof typeof MATCH_COMMENTARY;
     if(status.clinched) category = 'clinched';
     else if(result.leadChangedThisHole && status.leader) category = 'leadChanged';
     else if(status.leader===null) category = 'allSquare';
     else category = Math.abs(result.diff)>=4 ? 'trailingBig' : 'trailingSmall';
-    return pickMatchCommentary(category, relevantPlayersFor(result, status));
+    const relevantPlayers = includePersonalLines ? relevantPlayersFor(result, status) : [];
+    return pickMatchCommentaryLine(category, relevantPlayers);
   }
 
   function renderTeamGameCard(roundId:string, g: RoundGroup, result:any){
     const status = matchStatusText(result);
     const arrow = status.leader==='A' ? '◀ ' : status.leader==='B' ? '▶ ' : '';
-    const commentary = commentaryFor(result, status);
+    const commentary = commentaryFor(result, status, false);
     const aLeads = status.leader==='A', bLeads = status.leader==='B';
     function names(list:string[]){
       return list.map((n:string)=>`<span style="display:inline-flex;align-items:center;gap:4px;margin-right:6px;">${avatarHtml(findPlayerObj(n),20)}${esc(n)}</span>`).join('');
@@ -1656,20 +1693,19 @@ function initApp() {
       const p = findPlayerObj(name);
       return `${avatarHtml(p,22)}<span>${esc(name)}</span>`;
     }
-    function lastPlaceBadge(name:string){
-      const line = pickPlayerLine(name);
-      return ` <span title="${esc(line || LAST_PLACE_LABEL)}">🐌</span>`;
+    // Leaders never shows player-specific content — just the generic
+    // "bringing up the rear" label, no personal insult lookup.
+    function lastPlaceBadge(){
+      return ` <span title="${esc(LAST_PLACE_LABEL)}">🐌</span>`;
     }
     function leaderRow(x:any, i:number, lastName:string|null){
       const isLast = lastName!=null && x.p===lastName;
-      const line = isLast ? pickPlayerLine(x.p) : null;
       return `
         <div style="padding:4px 0;border-bottom:1px solid var(--border);">
           <div class="row">
-            <span style="font-size:12.5px;display:flex;align-items:center;gap:6px;"><b>${i+1}.</b> ${nameCell(x.p)}${isLast?lastPlaceBadge(x.p):''}</span>
+            <span style="font-size:12.5px;display:flex;align-items:center;gap:6px;"><b>${i+1}.</b> ${nameCell(x.p)}${isLast?lastPlaceBadge():''}</span>
             <span style="font-size:12.5px;">${x.diff>0?'+':''}${x.diff}</span>
           </div>
-          ${isLast && line ? `<div style="font-size:10px;font-style:italic;color:var(--text-muted);margin-top:2px;">${esc(line)}</div>` : ''}
         </div>`;
     }
 
@@ -2033,6 +2069,7 @@ function initApp() {
           ${isAuto? `<span class="pill" style="font-size:9px;">AUTO</span>` : ''}
           <span class="time">${esc(m.time||'')}</span>
         </div>
+        ${m.headerText? `<div style="display:inline-block;margin-top:6px;font-size:12.5px;font-weight:800;color:#fff;background:var(--danger-text);padding:3px 10px;border-radius:8px;">${esc(m.headerText)}</div>` : ''}
         <div style="font-size:14px;margin-top:4px;clear:both;${isAuto?'font-weight:600;':''}">${esc(m.text||'')}</div>
         ${m.photo? `<img src="${m.photo}"/>` : ''}
         ${m.video? `<video src="${m.video}" controls playsinline style="width:100%;border-radius:8px;margin-top:6px;"></video>` : ''}
@@ -2161,19 +2198,31 @@ function initApp() {
       <div class="card">
         <h3>💥 Quad Bogey Insults</h3>
         <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">
-          Custom lines for a specific player's own quad-bogey-or-worse (4+ over par) holes — a separate pool from the built-in joke bank, entirely admin-written. Empty by default; a player's line here is used instead of the generic one when they blow up a hole.
+          The single source for every player-specific insult/commentary line in the app — Score page match commentary and blowup-hole (4+ over par) feed posts both pull exclusively from here. Never shown on Leaders. Fully admin-editable.
         </div>
         ${!selected ? '<div class="empty">Add players to the roster first.</div>' : `
         <label class="field">Player</label>
         <select data-action="admin-pick-insult-player">${roster.map(n=>`<option value="${esc(n)}" ${n===selected?'selected':''}>${esc(n)}</option>`).join('')}</select>
         <div style="margin:10px 0;">
           ${lines.length===0 ? `<div class="empty" style="padding:10px 4px;">No custom lines yet for ${esc(selected)}.</div>` :
-            lines.map((line,idx)=>`
-            <div class="row" style="padding:6px 0;border-bottom:1px solid var(--border);align-items:flex-start;">
-              <span style="font-size:13px;flex:1;padding-right:8px;">${esc(line)}</span>
-              <button class="btn small" data-action="admin-remove-insult-line" data-idx="${idx}">✕</button>
-            </div>
-          `).join('')}
+            lines.map((line,idx)=>{
+              if(state.adminInsultEditingIdx===idx){
+                return `
+                <div style="padding:6px 0;border-bottom:1px solid var(--border);">
+                  <input type="text" id="admin-insult-edit-input" value="${esc(line)}" style="margin-bottom:6px;"/>
+                  <div style="display:flex;gap:8px;">
+                    <button class="btn primary small" data-action="admin-save-insult-line" data-idx="${idx}">Save</button>
+                    <button class="btn small" data-action="admin-cancel-edit-insult-line">Cancel</button>
+                  </div>
+                </div>`;
+              }
+              return `
+              <div class="row" style="padding:6px 0;border-bottom:1px solid var(--border);align-items:flex-start;">
+                <span style="font-size:13px;flex:1;padding-right:8px;">${esc(line)}</span>
+                <button class="btn small" data-action="admin-edit-insult-line" data-idx="${idx}">Edit</button>
+                <button class="btn small" data-action="admin-remove-insult-line" data-idx="${idx}">✕</button>
+              </div>`;
+            }).join('')}
         </div>
         <label class="field">Add a new line for ${esc(selected)}</label>
         <div style="display:flex;gap:8px;">
@@ -3245,7 +3294,11 @@ function initApp() {
       }; }
       if(action==='audit-filter-round'){ el.onchange=()=>{ state.auditFilterRound = el.value; render(); }; }
       if(action==='audit-filter-player'){ el.onchange=()=>{ state.auditFilterPlayer = el.value; render(); }; }
-      if(action==='admin-pick-insult-player'){ el.onchange=()=>{ state.adminInsultPlayer = el.value; render(); }; }
+      if(action==='admin-pick-insult-player'){ el.onchange=()=>{
+        state.adminInsultPlayer = el.value;
+        state.adminInsultEditingIdx = null;
+        render();
+      }; }
       if(action==='admin-add-insult-line'){ el.onclick=()=>{
         const input = document.getElementById('admin-insult-new-line') as HTMLInputElement | null;
         const text = input ? input.value.trim() : '';
@@ -3258,11 +3311,31 @@ function initApp() {
         if(input) input.value='';
         render();
       }; }
+      if(action==='admin-edit-insult-line'){ el.onclick=()=>{
+        state.adminInsultEditingIdx = parseInt(el.dataset.idx,10);
+        render();
+      }; }
+      if(action==='admin-cancel-edit-insult-line'){ el.onclick=()=>{
+        state.adminInsultEditingIdx = null;
+        render();
+      }; }
+      if(action==='admin-save-insult-line'){ el.onclick=()=>{
+        const input = document.getElementById('admin-insult-edit-input') as HTMLInputElement | null;
+        const text = input ? input.value.trim() : '';
+        if(!text) return;
+        const player = (state.adminInsultPlayer && allPlayerNames().includes(state.adminInsultPlayer)) ? state.adminInsultPlayer : allPlayerNames()[0];
+        if(!player || !state.customQuadBogeyLines[player]) return;
+        state.customQuadBogeyLines[player][parseInt(el.dataset.idx,10)] = text;
+        saveCustomQuadBogeyLines();
+        state.adminInsultEditingIdx = null;
+        render();
+      }; }
       if(action==='admin-remove-insult-line'){ el.onclick=()=>{
         const player = (state.adminInsultPlayer && allPlayerNames().includes(state.adminInsultPlayer)) ? state.adminInsultPlayer : allPlayerNames()[0];
         if(!player || !state.customQuadBogeyLines[player]) return;
         if(!confirm('Remove this line?')) return;
         state.customQuadBogeyLines[player].splice(parseInt(el.dataset.idx,10),1);
+        state.adminInsultEditingIdx = null;
         saveCustomQuadBogeyLines();
         render();
       }; }
