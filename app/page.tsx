@@ -124,22 +124,27 @@ function initApp() {
     const apf = await kvGet('auto-post-flags'); if(apf) state.autoPostFlags = apf;
     const sal = await kvGet('score-audit-log'); if(sal) state.scoreAuditLog = sal;
     const lo = await kvGet('lunch-orders'); if(lo) state.lunchOrders = lo;
-    // Migration: merge in any DEFAULT_CUSTOM_QUAD_BOGEY_LINES player who
-    // isn't already a key in the saved row. The admin insults tool existed
-    // before this migration was written, so the row was often already
-    // saved (e.g. with just manually-added lines) — gating on "row exists
-    // at all" would skip seeding forever. Keying per-player instead means:
-    // a player never touched gets seeded once; a player the admin
-    // deliberately cleared to [] keeps their empty array (the key already
-    // exists, so it's left alone) rather than being silently re-seeded.
+    // Migration: for every DEFAULT_CUSTOM_QUAD_BOGEY_LINES player, append
+    // whichever of their default lines aren't already present in the saved
+    // row (exact text match) — per-line, not per-player. A player-level
+    // check ("does this player have any entries at all?") would skip
+    // players who already had a manually-added test line before this
+    // migration shipped, silently dropping the rest of their default bank.
+    // Checking each line individually is idempotent (never re-adds a line
+    // already there) and never touches lines that aren't part of the
+    // default bank, so anything genuinely custom is left alone.
     const cql = await kvGet('custom-quad-bogey-lines');
     const merged: Record<string, string[]> = cql ? {...cql} : {};
     let seededSomething = false;
     Object.keys(DEFAULT_CUSTOM_QUAD_BOGEY_LINES).forEach(player=>{
-      if(!(player in merged)){
-        merged[player] = [...DEFAULT_CUSTOM_QUAD_BOGEY_LINES[player]];
-        seededSomething = true;
-      }
+      const existing = merged[player] ? [...merged[player]] : [];
+      DEFAULT_CUSTOM_QUAD_BOGEY_LINES[player].forEach(line=>{
+        if(!existing.includes(line)){
+          existing.push(line);
+          seededSomething = true;
+        }
+      });
+      merged[player] = existing;
     });
     state.customQuadBogeyLines = merged;
     if(!cql || seededSomething) saveCustomQuadBogeyLines();
