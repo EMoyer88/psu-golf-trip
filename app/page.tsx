@@ -1521,7 +1521,7 @@ function initApp() {
           <button class="link-btn" data-action="toggle-mulligan-panel">Close</button>
         </div>
         ${editable ? `
-        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Who's taking the mulligan? We'll record a quick 10-second video of it.</div>
+        <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">Who's taking the mulligan? We'll record a quick 15-second video of it.</div>
         <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;">
           ${group.players.map((name:string)=>`<span class="chip" data-action="start-mulligan-capture" data-player="${esc(name)}" data-round="${esc(round.id)}">${esc(name)}</span>`).join('')}
         </div>` : ''}
@@ -2779,7 +2779,7 @@ function initApp() {
         <video id="mull-video" autoplay muted playsinline style="width:100%;height:100%;object-fit:cover;"></video>
         <div style="position:absolute;top:16px;left:16px;background:rgba(0,0,0,0.55);color:#fff;padding:6px 12px;border-radius:20px;font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px;">
           <span style="width:10px;height:10px;border-radius:50%;background:#e53935;animation:mullpulse 1s infinite;"></span>
-          <span id="mull-timer">Recording… 10</span>
+          <span id="mull-timer">Recording… 15</span>
         </div>
         <button id="mull-cancel" style="position:absolute;top:16px;right:16px;background:rgba(0,0,0,0.55);color:#fff;border:none;border-radius:20px;padding:6px 12px;font-size:13px;">Cancel</button>
       </div>
@@ -2806,7 +2806,7 @@ function initApp() {
       // Compression happens at capture time (constrained resolution/frame
       // rate above + a capped bitrate here) rather than a separate transcode
       // pass — there's no lightweight in-browser video transcoder available,
-      // and this keeps a 10s clip to a reasonable upload size.
+      // and this keeps a 15s clip to a reasonable upload size.
       const recorder = preferredType
         ? new MediaRecorder(stream, { mimeType: preferredType, videoBitsPerSecond: 1_000_000 })
         : new MediaRecorder(stream, { videoBitsPerSecond: 1_000_000 });
@@ -2825,7 +2825,7 @@ function initApp() {
         showMulliganReview(overlay, player, roundId, blob);
       };
       recorder.start();
-      let remaining = 10;
+      let remaining = 15;
       const timerEl = document.getElementById('mull-timer');
       const iv = setInterval(()=>{
         remaining--;
