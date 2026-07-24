@@ -596,7 +596,6 @@ function initApp() {
   // from a birdie/eagle clears the flag without posting. Editing INTO one —
   // whether fresh or a correction — posts, since the stored type changed.
   function checkBirdieEagleAutoPost(roundId:string, hole:number, player:string, val:number){
-    if(roundId==='fri') return; // Saturday only in this batch
     const round = roundOf(roundId);
     const h = round.holes.find(hh=>hh.n===hole);
     if(!h) return;
@@ -608,6 +607,12 @@ function initApp() {
     if(newType===prevType) return;
     state.autoPostFlags[key] = newType;
     saveAutoPostFlags();
+    // Birdie/eagle posts are Saturday-only (same tournament-leaderboard
+    // scope as the birdie/eagle board itself, which reads Friday's
+    // trackBirdies:false). Blowup-hole has no such scope — it fires on
+    // every round, Friday included — so the Friday exclusion applies to
+    // birdie/eagle specifically, not as a blanket early-return.
+    if((newType==='birdie' || newType==='eagle') && roundId==='fri') return;
     if(newType && (AUTO_POST_CONFIG.enabled as any)[newType]){
       if(newType==='blowupHole'){
         const header = AUTO_POST_CONFIG.templates.blowupHoleHeader(hole, diff);

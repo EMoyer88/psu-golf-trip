@@ -56,8 +56,10 @@ export const LAST_PLACE_LABEL = "Bringing up the rear";
 // Everything about the "⛳ Live Update" system-authored posts — which
 // triggers are on, the point thresholds, and the message wording — lives
 // here so any of it can be tweaked later without touching the trigger
-// logic in app/page.tsx. Saturday (AM + PM) only; Friday is intentionally
-// excluded from all of these in this batch.
+// logic in app/page.tsx. birdie/eagle/matchClinched/bigLeadMilestone are
+// Saturday (AM + PM) only, scoped to the tournament leaderboard/2v2 match
+// play that don't exist on Friday. blowupHole has no such scope and fires
+// on every round, Friday included — see checkBirdieEagleAutoPost().
 export const AUTO_POST_CONFIG = {
   authorName: '⛳ Live Update',
   enabled: {
